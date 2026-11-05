@@ -2,11 +2,18 @@
 -- ADDON CONFIGURATION (Edit display names and defaults here)
 -- ============================================================================
 local CONFIG = {
-    ADDON_NAME          = "Cache ReQuest",
-    QUESTLOG_BTN_ALL    = "Filter Rewards: All",
-    TRACKER_BTN_ALL     = "Filter: All",
-    HEADER_TITLE        = "Available Rewards:",
-     collapseRightOffset = -65, -- Distance of [+] / [-] from right edge of dropdown
+    ADDON_NAME           = "Cache ReQuest",
+    QUESTLOG_BTN_ALL     = "Filter Rewards: All",
+    TRACKER_BTN_ALL      = "Filter: All",
+    HEADER_TITLE         = "Available Rewards:",
+    collapseRightOffset  = -65,  -- Distance of [+] / [-] from right edge of dropdown
+    dimmedPinAlpha       = 0.18, -- Opacity of non-matching map pins when in [Dim] mode
+    mapIconSize          = 20,   -- Icon size (px) for World Map reward icons
+    mapIconBuffer        = 6,    -- Buffer gap (px) between adjacent/colliding map icons in a line
+    coalescePadding      = 10,   -- Extra pixel radius within which same-type map icons coalesce
+    pinUnderOffset       = 18,   -- Vertical offset (px) placing icons below their quest pin
+    logIconSize          = 14,   -- Icon size (px) for Quest Log vertical reward lines
+    showDefaultLogBadges = true, -- Show stacked reward lines in the unfiltered Quest Log
 }
 -- ============================================================================
 
@@ -15,27 +22,41 @@ local collapsedCategories = {}
 local knownRewardMeta = {}
 local autoUntrack = true
 local showCategories = true
+local showMapBadges = true
+local showMapLegend = true
+local filterMapPins = true
+local hideUnmatchedMapPins = false
+local legendCollapsed = false
 
 local availableRewards = {}
 local dropdownDisplayList = {}
 local questRewardMap = {}
 local matchingQuestsList = {}
+local rewardRegistry = {}
+local activeZoneRewards = {}
 
 local dropdownRowPool = {}
 local customListRowPool = {}
+local questLogRewardRowPool = {}
+local mapMarkerPool = {}
+local legendOverlayRowPool = {}
+
 local savedWatchedQuests = nil
 local isSyncingTracker = false
+local preloadRefreshPending = false
 
 local customScrollOffset = 0
 local dropdownScrollOffset = 0
 local dropdownSearchText = ""
 
-local MAX_CUSTOM_ROWS = 13
+local MAX_CUSTOM_ROWS = 8
 local MAX_DROPDOWN_ROWS = 15
 
 local sharedMenuFrame = nil
 local questLogBar = nil
 local trackerFilterBtn = nil
+local mapOverlayHolder = nil
+local mapLegendOverlay = nil
 
 local CATEGORY_NAMES = {
     [1] = "Seasonal & Event",
@@ -43,6 +64,15 @@ local CATEGORY_NAMES = {
     [3] = "Reputation & Renown",
     [4] = "Items & Caches",
     [5] = "Gear & Gold",
+}
+
+-- Priority used when choosing which reward icons to show under a map pin when no filter is active
+local MAP_BADGE_CATEGORY_PRIORITY = {
+    [4] = 1, -- Items & Caches first
+    [1] = 2, -- Seasonal & Event second
+    [2] = 3, -- Currencies third
+    [3] = 4, -- Reputation & Renown fourth
+    [5] = 5, -- Gear & Gold last
 }
 
 local SEASONAL_CURRENCY_IDS = {
@@ -75,6 +105,9 @@ local SEASONAL_KEYWORDS = {
     "holiday", "festival"
 }
 
+local ApplyFilterChanges
+local RebuildDropdownMenu
+
 -- Persist state to SavedVariables table so selections survive /reload
 local function SaveState()
     QRF_SavedState = QRF_SavedState or {}
@@ -84,6 +117,11 @@ local function SaveState()
     QRF_SavedState.savedWatchedQuests = savedWatchedQuests
     QRF_SavedState.autoUntrack = autoUntrack
     QRF_SavedState.showCategories = showCategories
+    QRF_SavedState.showMapBadges = showMapBadges
+    QRF_SavedState.showMapLegend = showMapLegend
+    QRF_SavedState.filterMapPins = filterMapPins
+    QRF_SavedState.hideUnmatchedMapPins = hideUnmatchedMapPins
+    QRF_SavedState.legendCollapsed = legendCollapsed
 end
 
 local function LoadState()
@@ -94,6 +132,11 @@ local function LoadState()
         savedWatchedQuests = QRF_SavedState.savedWatchedQuests
         if QRF_SavedState.autoUntrack ~= nil then autoUntrack = QRF_SavedState.autoUntrack end
         if QRF_SavedState.showCategories ~= nil then showCategories = QRF_SavedState.showCategories end
+        if QRF_SavedState.showMapBadges ~= nil then showMapBadges = QRF_SavedState.showMapBadges end
+        if QRF_SavedState.showMapLegend ~= nil then showMapLegend = QRF_SavedState.showMapLegend end
+        if QRF_SavedState.filterMapPins ~= nil then filterMapPins = QRF_SavedState.filterMapPins end
+        if QRF_SavedState.hideUnmatchedMapPins ~= nil then hideUnmatchedMapPins = QRF_SavedState.hideUnmatchedMapPins end
+        if QRF_SavedState.legendCollapsed ~= nil then legendCollapsed = QRF_SavedState.legendCollapsed end
     end
 end
 
@@ -202,53 +245,299 @@ local function ApplyHorizontalGradient(tex, r, g, b, leftAlpha, rightAlpha)
     end
 end
 
--- Scans all accepted quests and preserves any active selections even if a header is collapsed
-local function ScanQuestLogRewards()
-    wipe(availableRewards)
-    wipe(questRewardMap)
+-- Formats a single Quest Log reward line: [Quantity] [Icon] [Currency/Reward Name]
+local function FormatQuestLogRewardLine(amount, icon, name, isGold, isCurrency)
+    local iconSz = CONFIG.logIconSize or 14
+    local amtNum = amount or 1
+    local amtFormatted = BreakUpLargeNumbers and BreakUpLargeNumbers(amtNum) or tostring(amtNum)
+    local qtyColor = isGold and "|cFFFFD700" or (isCurrency and "|cFF00CCFF" or "|cFFFFFFFF")
+    local nameColor = isGold and "|cFFFFD700" or "|cFFE6E6E6"
+    local iconTag = "|T" .. tostring(icon or 134400) .. ":" .. iconSz .. ":" .. iconSz .. ":0:0|t"
+    return string.format("%s%s|r  %s  %s%s|r", qtyColor, amtFormatted, iconTag, nameColor, name or "Reward")
+end
 
-    local rewardRegistry = {}
-    local currentHeader = "Quests"
+-- Shows tooltip for a single or coalesced World Map reward icon
+local function ShowCoalescedNodeTooltip(ownerFrame, node)
+    if not node or not node.quests or #node.quests == 0 then return end
 
-    local function RegisterReward(questID, title, header, rewardID, name, icon, categoryGroup, sortPriority, badgeStr)
-        knownRewardMeta[rewardID] = {
-            id = rewardID,
-            name = name,
-            icon = icon,
-            categoryGroup = categoryGroup,
-            sortPriority = sortPriority,
-        }
+    GameTooltip:SetOwner(ownerFrame, "ANCHOR_RIGHT")
+    local iconTag = "|T" .. tostring(node.icon or 134400) .. ":16:16:0:0|t "
 
-        if not questRewardMap[questID] then
-            questRewardMap[questID] = {
-                questID = questID,
-                title = title or "Unknown Quest",
-                header = header or "Quests",
-                rewards = {},
-                badges = {},
-                order = {}
-            }
-        end
-        if not questRewardMap[questID].rewards[rewardID] then
-            questRewardMap[questID].rewards[rewardID] = true
-            questRewardMap[questID].badges[rewardID] = badgeStr
-            table.insert(questRewardMap[questID].order, rewardID)
-
-            if not rewardRegistry[rewardID] then
-                rewardRegistry[rewardID] = {
-                    id = rewardID,
-                    name = name,
-                    icon = icon,
-                    categoryGroup = categoryGroup,
-                    sortPriority = sortPriority,
-                    questCount = 0
-                }
-                table.insert(availableRewards, rewardRegistry[rewardID])
+    if #node.quests == 1 then
+        local qID = node.quests[1].questID
+        local qData = questRewardMap[qID]
+        if qData then
+            GameTooltip:AddLine(qData.title or "Quest Rewards", 1, 0.82, 0, true)
+            if qData.header and qData.header ~= "" then
+                GameTooltip:AddLine(qData.header, 0.6, 0.6, 0.6)
             end
-            rewardRegistry[rewardID].questCount = rewardRegistry[rewardID].questCount + 1
+            GameTooltip:AddLine(" ")
+            local activeCount = GetActiveFilterCount()
+            for _, rID in ipairs(qData.order) do
+                local info = qData.details and qData.details[rID]
+                if info then
+                    local rIcon = "|T" .. tostring(info.icon or 134400) .. ":15:15:0:0|t "
+                    local isMatched = (activeCount > 0 and selectedFilters[rID])
+                    local nameColor = isMatched and "|cFFFFD100" or "|cFFFFFFFF"
+                    local amtStr = BreakUpLargeNumbers and BreakUpLargeNumbers(info.amount or 1) or tostring(info.amount or 1)
+                    if rID == "GOLD" then
+                        GameTooltip:AddLine("|cFFFFD700" .. amtStr .. "|r " .. rIcon .. "|cFFFFD700Gold|r")
+                    else
+                        GameTooltip:AddLine("|cFF00CCFF" .. amtStr .. "|r " .. rIcon .. nameColor .. (info.name or "Reward") .. "|r")
+                    end
+                end
+            end
+        end
+    else
+        local totalAmount = 0
+        for _, qEntry in ipairs(node.quests) do
+            totalAmount = totalAmount + (qEntry.amount or 1)
+        end
+        local totalStr = BreakUpLargeNumbers and BreakUpLargeNumbers(totalAmount) or tostring(totalAmount)
+        GameTooltip:AddLine(iconTag .. (node.name or "Reward"), 1, 0.82, 0)
+        GameTooltip:AddLine(string.format("%d Quests Coalesced (Total: %s) — Zoom in to separate", #node.quests, totalStr), 0.55, 0.85, 1.0)
+        GameTooltip:AddLine(" ")
+
+        for idx, qEntry in ipairs(node.quests) do
+            if idx <= 10 then
+                local qData = questRewardMap[qEntry.questID]
+                local qTitle = (qData and qData.title) or ("Quest #" .. tostring(qEntry.questID))
+                local amtStr = BreakUpLargeNumbers and BreakUpLargeNumbers(qEntry.amount or 1) or tostring(qEntry.amount or 1)
+                GameTooltip:AddDoubleLine("|cFFFFFFFF" .. qTitle .. "|r", "|cFF00CCFF" .. amtStr .. "|r " .. iconTag)
+            end
+        end
+        if #node.quests > 10 then
+            GameTooltip:AddLine(string.format("...and %d more quests", #node.quests - 10), 0.6, 0.6, 0.6)
         end
     end
 
+    GameTooltip:Show()
+end
+
+-- Enumerates all active pins on the World Map safely across 12.x templates
+local function ForEachWorldMapPin(callback)
+    if not WorldMapFrame then return end
+    if WorldMapFrame.EnumerateAllPins then
+        for pin in WorldMapFrame:EnumerateAllPins() do
+            callback(pin)
+        end
+    elseif WorldMapFrame.pinPools then
+        for _, pool in pairs(WorldMapFrame.pinPools) do
+            if pool.EnumerateActive then
+                for pin in pool:EnumerateActive() do
+                    callback(pin)
+                end
+            end
+        end
+    end
+end
+
+-- Extracts a questID from any World Map quest/world-quest/offer pin template
+local function GetPinQuestID(pin)
+    if not pin then return nil end
+    if type(pin.questID) == "number" and pin.questID > 0 then
+        return pin.questID
+    end
+    if type(pin.GetQuestID) == "function" then
+        local ok, qID = pcall(pin.GetQuestID, pin)
+        if ok and type(qID) == "number" and qID > 0 then
+            return qID
+        end
+    end
+    if pin.questLineInfo and type(pin.questLineInfo.questID) == "number" and pin.questLineInfo.questID > 0 then
+        return pin.questLineInfo.questID
+    end
+    if pin.info and type(pin.info.questID) == "number" and pin.info.questID > 0 then
+        return pin.info.questID
+    end
+    return nil
+end
+
+-- Extracts normalized (0..1, 0..1) canvas coordinates for a World Map pin
+local function GetPinNormalizedPosition(pin, canvas)
+    if not pin then return nil, nil end
+    if type(pin.GetPosition) == "function" then
+        local ok, x, y = pcall(pin.GetPosition, pin)
+        if ok and type(x) == "number" and type(y) == "number" and x > 0 and y > 0 then
+            return x, y
+        end
+    end
+    if type(pin.normalizedX) == "number" and type(pin.normalizedY) == "number" then
+        return pin.normalizedX, pin.normalizedY
+    end
+    if canvas and pin.GetCenter and canvas.GetLeft and canvas.GetTop then
+        local px, py = pin:GetCenter()
+        local cLeft, cTop = canvas:GetLeft(), canvas:GetTop()
+        local cW, cH = canvas:GetWidth(), canvas:GetHeight()
+        if px and py and cLeft and cTop and cW and cH and cW > 0 and cH > 0 then
+            local pScale = pin:GetEffectiveScale()
+            local cScale = canvas:GetEffectiveScale()
+            local normX = ((px * pScale / cScale) - cLeft) / cW
+            local normY = (cTop - (py * pScale / cScale)) / cH
+            if normX >= 0 and normX <= 1 and normY >= 0 and normY <= 1 then
+                return normX, normY
+            end
+        end
+    end
+    return nil, nil
+end
+
+-- Resolves a quest title for either log quests, task quests, or map pins
+local function ResolveQuestTitle(questID, fallbackTitle)
+    if fallbackTitle and fallbackTitle ~= "" then return fallbackTitle end
+    if C_QuestLog and C_QuestLog.GetTitleForQuestID then
+        local title = C_QuestLog.GetTitleForQuestID(questID)
+        if title and title ~= "" then return title end
+    end
+    if C_TaskQuest and C_TaskQuest.GetQuestInfoByQuestID then
+        local title = C_TaskQuest.GetQuestInfoByQuestID(questID)
+        if title and title ~= "" then return title end
+    end
+    return "Quest #" .. tostring(questID)
+end
+
+-- Registers a single reward into questRewardMap and availableRewards
+local function RegisterReward(questID, title, header, rewardID, name, icon, categoryGroup, sortPriority, logLineStr, amount, isMapQuest)
+    knownRewardMeta[rewardID] = {
+        id = rewardID,
+        name = name,
+        icon = icon,
+        categoryGroup = categoryGroup,
+        sortPriority = sortPriority,
+    }
+
+    if not questRewardMap[questID] then
+        questRewardMap[questID] = {
+            questID = questID,
+            title = title or "Unknown Quest",
+            header = header or "Quests",
+            isMapQuest = isMapQuest == true,
+            rewards = {},
+            badges = {},
+            details = {},
+            categories = {},
+            order = {}
+        }
+    end
+    if not questRewardMap[questID].rewards[rewardID] then
+        questRewardMap[questID].rewards[rewardID] = true
+        questRewardMap[questID].badges[rewardID] = logLineStr
+        questRewardMap[questID].details[rewardID] = {
+            id = rewardID,
+            name = name,
+            icon = icon,
+            amount = amount or 1,
+            categoryGroup = categoryGroup
+        }
+        questRewardMap[questID].categories[rewardID] = categoryGroup
+        table.insert(questRewardMap[questID].order, rewardID)
+
+        if not rewardRegistry[rewardID] then
+            rewardRegistry[rewardID] = {
+                id = rewardID,
+                name = name,
+                icon = icon,
+                categoryGroup = categoryGroup,
+                sortPriority = sortPriority,
+                questCount = 0
+            }
+            table.insert(availableRewards, rewardRegistry[rewardID])
+        end
+        rewardRegistry[rewardID].questCount = rewardRegistry[rewardID].questCount + 1
+    end
+end
+
+-- Scans a single questID (accepted or unaccepted map quest) for currencies, items, caches, and gold
+local function ScanSingleQuestRewards(questID, qTitle, headerName, isMapQuest)
+    if not questID or questRewardMap[questID] then return end
+
+    if HaveQuestRewardData and not HaveQuestRewardData(questID) and C_TaskQuest and C_TaskQuest.RequestPreloadRewardData then
+        C_TaskQuest.RequestPreloadRewardData(questID)
+    end
+
+    local resolvedTitle = ResolveQuestTitle(questID, qTitle)
+
+    -- 1. Currencies, Seasonal Currencies & Faction Reputation
+    local currencies = GetQuestCurrencies(questID)
+    if currencies and #currencies > 0 then
+        for _, curr in ipairs(currencies) do
+            local cID = "CURR_" .. tostring(curr.currencyID or curr.name or "UNKNOWN")
+            local cName = curr.name or "Currency"
+            local cIcon = curr.texture or 134400
+            local amt = curr.totalRewardAmount or curr.numItems or 1
+            local logLine = FormatQuestLogRewardLine(amt, cIcon, cName, false, true)
+
+            local catGroup = 2
+            if IsSeasonalReward(cName, curr.currencyID, nil) then
+                catGroup = 1
+            elseif IsReputationReward(cName, curr.currencyID) then
+                catGroup = 3
+            end
+
+            RegisterReward(questID, resolvedTitle, headerName, cID, cName, cIcon, catGroup, 1, logLine, amt, isMapQuest)
+        end
+    end
+
+    -- 2. Guaranteed Items & Choice Items
+    local function ProcessQuestItem(name, tex, numItems, itemID)
+        if not itemID and not name then return end
+        if IsItemEquipment(itemID) then
+            local icon = tex or 132739
+            local eqName = name or "Equipment & Weapons"
+            local logLine = FormatQuestLogRewardLine(numItems or 1, icon, eqName, false, false)
+            RegisterReward(questID, resolvedTitle, headerName, "ITEM_GEAR", "Equipment & Weapons", icon, 5, 1, logLine, numItems or 1, isMapQuest)
+        else
+            if itemID and not name and C_Item and C_Item.RequestLoadItemDataByID then
+                C_Item.RequestLoadItemDataByID(itemID)
+            end
+            local rID = "ITEM_" .. tostring(itemID or name or "ITEM")
+            local metaName = knownRewardMeta[rID] and knownRewardMeta[rID].name
+            local liveName = (itemID and C_Item and C_Item.GetItemNameByID and C_Item.GetItemNameByID(itemID)) or nil
+            local rName = name or liveName or metaName or ("Item #" .. tostring(itemID or ""))
+            local rIcon = tex or (knownRewardMeta[rID] and knownRewardMeta[rID].icon) or 134400
+            local logLine = FormatQuestLogRewardLine(numItems or 1, rIcon, rName, false, false)
+
+            local catGroup = 4
+            if IsSeasonalReward(rName, nil, itemID) then
+                catGroup = 1
+            elseif IsReputationReward(rName, nil) then
+                catGroup = 3
+            end
+
+            RegisterReward(questID, resolvedTitle, headerName, rID, rName, rIcon, catGroup, 2, logLine, numItems or 1, isMapQuest)
+        end
+    end
+
+    local numRewards = GetNumQuestLogRewards and GetNumQuestLogRewards(questID) or 0
+    for r = 1, numRewards do
+        local name, tex, numItems, _, _, itemID = GetQuestLogRewardInfo(r, questID)
+        ProcessQuestItem(name, tex, numItems, itemID)
+    end
+
+    local numChoices = GetNumQuestLogChoices and GetNumQuestLogChoices(questID) or 0
+    for c = 1, numChoices do
+        local name, tex, numItems, _, _, itemID = GetQuestLogChoiceInfo(c, questID)
+        ProcessQuestItem(name, tex, numItems, itemID)
+    end
+
+    -- 3. Gold
+    local gold = GetQuestGold(questID)
+    if gold > 0 then
+        local goldIcon = "Interface\\MoneyFrame\\UI-GoldIcon"
+        local logLine = FormatQuestLogRewardLine(gold, goldIcon, "Gold", true, false)
+        RegisterReward(questID, resolvedTitle, headerName, "GOLD", "Gold", goldIcon, 5, 2, logLine, gold, isMapQuest)
+    end
+end
+
+-- Scans all accepted quests AND available quests on the currently viewed local Zone Map
+local function ScanQuestLogRewards()
+    wipe(availableRewards)
+    wipe(questRewardMap)
+    wipe(rewardRegistry)
+
+    local currentHeader = "Quests"
+
+    -- 1. Scan Accepted Quests in the Player's Quest Log
     local numEntries = C_QuestLog.GetNumQuestLogEntries()
     for i = 1, numEntries do
         local info = C_QuestLog.GetInfo(i)
@@ -256,81 +545,50 @@ local function ScanQuestLogRewards()
             if info.isHeader then
                 currentHeader = info.title or "Quests"
             elseif not info.isHidden and info.questID then
-                local questID = info.questID
-                local qTitle = info.title or "Quest"
+                ScanSingleQuestRewards(info.questID, info.title, currentHeader, false)
+            end
+        end
+    end
 
-                if HaveQuestRewardData and not HaveQuestRewardData(questID) and C_TaskQuest and C_TaskQuest.RequestPreloadRewardData then
-                    C_TaskQuest.RequestPreloadRewardData(questID)
-                end
+    -- 2. Scan Available Quests on the Active Zone Map
+    local activeMapID = (WorldMapFrame and WorldMapFrame:IsShown() and WorldMapFrame:GetMapID())
+        or (C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player"))
 
-                -- 1. Currencies, Seasonal Currencies & Faction Reputation
-                local currencies = GetQuestCurrencies(questID)
-                if currencies and #currencies > 0 then
-                    for _, curr in ipairs(currencies) do
-                        local cID = "CURR_" .. tostring(curr.currencyID or curr.name or "UNKNOWN")
-                        local cName = curr.name or "Currency"
-                        local cIcon = curr.texture or 134400
-                        local amt = curr.totalRewardAmount or curr.numItems or 0
-                        local badge = "|T" .. cIcon .. ":14:14:0:0|t|cFF00CCFF" .. amt .. "|r"
+    if activeMapID and activeMapID > 0 then
+        local mapInfo = C_Map and C_Map.GetMapInfo and C_Map.GetMapInfo(activeMapID)
+        if not mapInfo or not mapInfo.mapType or mapInfo.mapType >= 3 then
+            local mapHeader = (mapInfo and mapInfo.name) or "Current Zone"
 
-                        local catGroup = 2
-                        if IsSeasonalReward(cName, curr.currencyID, nil) then
-                            catGroup = 1
-                        elseif IsReputationReward(cName, curr.currencyID) then
-                            catGroup = 3
+            if C_TaskQuest and C_TaskQuest.GetQuestsForPlayerByMapID then
+                local taskQuests = C_TaskQuest.GetQuestsForPlayerByMapID(activeMapID)
+                if taskQuests then
+                    for _, taskInfo in ipairs(taskQuests) do
+                        local qID = taskInfo.questId or taskInfo.questID
+                        if qID and not questRewardMap[qID] then
+                            ScanSingleQuestRewards(qID, nil, mapHeader, true)
                         end
-
-                        RegisterReward(questID, qTitle, currentHeader, cID, cName, cIcon, catGroup, 1, badge)
                     end
                 end
+            end
 
-                -- 2. Guaranteed Items & Choice Items
-                local function ProcessQuestItem(name, tex, numItems, itemID)
-                    if IsItemEquipment(itemID) then
-                        local icon = tex or 132739
-                        local badge = "|T" .. icon .. ":14:14:0:0|t"
-                        RegisterReward(questID, qTitle, currentHeader, "ITEM_GEAR", "Equipment & Weapons", icon, 5, 1, badge)
-                    else
-                        if itemID and not name and C_Item and C_Item.RequestLoadItemDataByID then
-                            C_Item.RequestLoadItemDataByID(itemID)
+            if C_QuestLine and C_QuestLine.GetAvailableQuestLines then
+                local questLines = C_QuestLine.GetAvailableQuestLines(activeMapID)
+                if questLines then
+                    for _, ql in ipairs(questLines) do
+                        if ql.questID and not questRewardMap[ql.questID] then
+                            ScanSingleQuestRewards(ql.questID, ql.questName, mapHeader, true)
                         end
-                        local rID = "ITEM_" .. tostring(itemID or name or "ITEM")
-                        local metaName = knownRewardMeta[rID] and knownRewardMeta[rID].name
-                        local rName = name or metaName or ("Item #" .. tostring(itemID or ""))
-                        local rIcon = tex or (knownRewardMeta[rID] and knownRewardMeta[rID].icon) or 134400
-                        local amtStr = (numItems and numItems > 1) and ("|cFFFFFFFF" .. numItems .. "|r") or ""
-                        local badge = "|T" .. rIcon .. ":14:14:0:0|t" .. amtStr
-
-                        local catGroup = 4
-                        if IsSeasonalReward(rName, nil, itemID) then
-                            catGroup = 1
-                        elseif IsReputationReward(rName, nil) then
-                            catGroup = 3
-                        end
-
-                        RegisterReward(questID, qTitle, currentHeader, rID, rName, rIcon, catGroup, 2, badge)
                     end
                 end
+            end
 
-                local numRewards = GetNumQuestLogRewards and GetNumQuestLogRewards(questID) or 0
-                for r = 1, numRewards do
-                    local name, tex, numItems, _, _, itemID = GetQuestLogRewardInfo(r, questID)
-                    ProcessQuestItem(name, tex, numItems, itemID)
-                end
-
-                local numChoices = GetNumQuestLogChoices and GetNumQuestLogChoices(questID) or 0
-                for c = 1, numChoices do
-                    local name, tex, numItems, _, _, itemID = GetQuestLogChoiceInfo(c, questID)
-                    ProcessQuestItem(name, tex, numItems, itemID)
-                end
-
-                -- 3. Gold
-                local gold = GetQuestGold(questID)
-                if gold > 0 then
-                    local goldIcon = "Interface\\MoneyFrame\\UI-GoldIcon"
-                    local badge = "|cFFFFD700" .. gold .. "g|r"
-                    RegisterReward(questID, qTitle, currentHeader, "GOLD", "Gold", goldIcon, 5, 2, badge)
-                end
+            if WorldMapFrame and WorldMapFrame:IsShown() then
+                ForEachWorldMapPin(function(pin)
+                    local qID = GetPinQuestID(pin)
+                    if qID and not questRewardMap[qID] then
+                        ScanSingleQuestRewards(qID, nil, mapHeader, true)
+                    end
+                end)
             end
         end
     end
@@ -360,6 +618,476 @@ local function ScanQuestLogRewards()
         end
         return a.name < b.name
     end)
+end
+
+-- Creates or updates the Map Legend Corner Overlay in the Top-Left of the World Map Canvas
+local function UpdateMapLegendUI(zoneRewardList, isLocalZoneMap)
+    if not WorldMapFrame then return end
+
+    local scrollContainer = WorldMapFrame.ScrollContainer
+    if scrollContainer and not mapLegendOverlay then
+        local overlay = CreateFrame("Frame", "QRF_MapLegendOverlay", scrollContainer)
+        overlay:SetPoint("TOPLEFT", scrollContainer, "TOPLEFT", 12, -12)
+        overlay:SetFrameStrata("HIGH")
+        overlay:SetFrameLevel(90)
+        overlay:EnableMouse(true)
+
+        overlay.bg = overlay:CreateTexture(nil, "BACKGROUND")
+        overlay.bg:SetAllPoints()
+        overlay.bg:SetColorTexture(0.05, 0.05, 0.07, 0.90)
+
+        overlay.topBorder = overlay:CreateTexture(nil, "BORDER")
+        overlay.topBorder:SetHeight(1)
+        overlay.topBorder:SetPoint("TOPLEFT", overlay, "TOPLEFT", 0, 0)
+        overlay.topBorder:SetPoint("TOPRIGHT", overlay, "TOPRIGHT", 0, 0)
+        overlay.topBorder:SetColorTexture(0.65, 0.55, 0.25, 0.85)
+
+        overlay.bottomBorder = overlay:CreateTexture(nil, "BORDER")
+        overlay.bottomBorder:SetHeight(1)
+        overlay.bottomBorder:SetPoint("BOTTOMLEFT", overlay, "BOTTOMLEFT", 0, 0)
+        overlay.bottomBorder:SetPoint("BOTTOMRIGHT", overlay, "BOTTOMRIGHT", 0, 0)
+        overlay.bottomBorder:SetColorTexture(0.45, 0.45, 0.5, 0.8)
+
+        overlay.leftBorder = overlay:CreateTexture(nil, "BORDER")
+        overlay.leftBorder:SetWidth(1)
+        overlay.leftBorder:SetPoint("TOPLEFT", overlay, "TOPLEFT", 0, 0)
+        overlay.leftBorder:SetPoint("BOTTOMLEFT", overlay, "BOTTOMLEFT", 0, 0)
+        overlay.leftBorder:SetColorTexture(0.65, 0.55, 0.25, 0.85)
+
+        overlay.rightBorder = overlay:CreateTexture(nil, "BORDER")
+        overlay.rightBorder:SetWidth(1)
+        overlay.rightBorder:SetPoint("TOPRIGHT", overlay, "TOPRIGHT", 0, 0)
+        overlay.rightBorder:SetPoint("BOTTOMRIGHT", overlay, "BOTTOMRIGHT", 0, 0)
+        overlay.rightBorder:SetColorTexture(0.45, 0.45, 0.5, 0.8)
+
+        overlay.headerBtn = CreateFrame("Button", nil, overlay)
+        overlay.headerBtn:SetHeight(20)
+        overlay.headerBtn:SetPoint("TOPLEFT", overlay, "TOPLEFT", 6, -2)
+        overlay.headerBtn:SetPoint("TOPRIGHT", overlay, "TOPRIGHT", -6, -2)
+
+        overlay.title = overlay.headerBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        overlay.title:SetPoint("LEFT", overlay.headerBtn, "LEFT", 2, 0)
+        overlay.title:SetText("|cFFFFD100Map Rewards Legend|r")
+
+        overlay.collapseText = overlay.headerBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        overlay.collapseText:SetPoint("RIGHT", overlay.headerBtn, "RIGHT", -2, 0)
+
+        overlay.divider = overlay:CreateTexture(nil, "ARTWORK")
+        overlay.divider:SetHeight(1)
+        overlay.divider:SetPoint("TOPLEFT", overlay, "TOPLEFT", 6, -22)
+        overlay.divider:SetPoint("TOPRIGHT", overlay, "TOPRIGHT", -6, -22)
+        overlay.divider:SetColorTexture(0.45, 0.45, 0.5, 0.6)
+
+        overlay.headerBtn:SetScript("OnClick", function()
+            legendCollapsed = not legendCollapsed
+            SaveState()
+            UpdateMapLegendUI(activeZoneRewards, true)
+        end)
+
+        mapLegendOverlay = overlay
+    end
+
+    if mapLegendOverlay then
+        mapLegendOverlay:ClearAllPoints()
+        mapLegendOverlay:SetPoint("TOPLEFT", scrollContainer, "TOPLEFT", 12, -12)
+
+        for _, row in ipairs(legendOverlayRowPool) do
+            row:Hide()
+        end
+
+        if showMapLegend and isLocalZoneMap and zoneRewardList and #zoneRewardList > 0 then
+            mapLegendOverlay.collapseText:SetText(legendCollapsed and "|cFFFFD100[+]|r" or "|cFFFFD100[-]|r")
+
+            if legendCollapsed then
+                mapLegendOverlay.divider:Hide()
+                mapLegendOverlay:SetSize(162, 24)
+            else
+                mapLegendOverlay.divider:Show()
+                local yOffset = -26
+                local rowH = 18
+                local maxW = 165
+                local shownCount = math.min(#zoneRewardList, 10)
+
+                for i = 1, shownCount do
+                    local rInfo = zoneRewardList[i]
+                    local row = legendOverlayRowPool[i]
+                    if not row then
+                        row = CreateFrame("Button", nil, mapLegendOverlay)
+                        row:SetHeight(rowH)
+                        row.highlight = row:CreateTexture(nil, "HIGHLIGHT")
+                        row.highlight:SetAllPoints()
+                        row.highlight:SetColorTexture(0.3, 0.6, 1.0, 0.22)
+                        row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                        row.text:SetPoint("LEFT", row, "LEFT", 4, 0)
+                        row.text:SetJustifyH("LEFT")
+                        row.text:SetWordWrap(false)
+                        legendOverlayRowPool[i] = row
+                    end
+
+                    row:SetPoint("TOPLEFT", mapLegendOverlay, "TOPLEFT", 6, yOffset)
+                    row:SetPoint("TOPRIGHT", mapLegendOverlay, "TOPRIGHT", -6, yOffset)
+
+                    local isSelected = selectedFilters[rInfo.id] == true
+                    local nameColor = isSelected and "|cFFFFD100" or "|cFFDDDDDD"
+                    local checkMark = isSelected and "|TInterface\\RaidFrame\\ReadyCheck-Ready:12:12:0:0|t " or ""
+                    local iconStr = "|T" .. tostring(rInfo.icon or 134400) .. ":15:15:0:0|t "
+                    row.text:SetText(string.format("%s%s%s%s|r |cFF999999(%d)|r", checkMark, iconStr, nameColor, rInfo.name or "Reward", rInfo.count or 1))
+
+                    local textW = (row.text:GetStringWidth() or 120) + 22
+                    if textW > maxW then maxW = textW end
+
+                    row:SetScript("OnClick", function()
+                        if selectedFilters[rInfo.id] then
+                            selectedFilters[rInfo.id] = nil
+                        else
+                            selectedFilters[rInfo.id] = true
+                        end
+                        ApplyFilterChanges()
+                        if sharedMenuFrame and sharedMenuFrame:IsShown() then
+                            RebuildDropdownMenu(sharedMenuFrame, false)
+                        end
+                    end)
+                    row:SetScript("OnEnter", function(self)
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:AddLine(iconStr .. (rInfo.name or "Reward"), 1, 0.82, 0)
+                        GameTooltip:AddLine("Click to toggle this reward filter on the map.", 0.8, 0.8, 0.8)
+                        GameTooltip:Show()
+                    end)
+                    row:SetScript("OnLeave", function()
+                        GameTooltip:Hide()
+                    end)
+
+                    row:Show()
+                    yOffset = yOffset - rowH
+                end
+
+                mapLegendOverlay:SetSize(math.min(maxW, 240), math.abs(yOffset) + 6)
+            end
+            mapLegendOverlay:Show()
+        else
+            mapLegendOverlay:Hide()
+        end
+    end
+end
+
+-- Acquires or creates a map canvas reward icon marker
+local function GetOrCreateMapMarker(index, canvas)
+    local marker = mapMarkerPool[index]
+    if not marker then
+        marker = CreateFrame("Frame", nil, canvas)
+        marker:SetSize(CONFIG.mapIconSize, CONFIG.mapIconSize)
+        marker:EnableMouse(true)
+        if marker.SetPassThroughButtons then
+            pcall(function() marker:SetPassThroughButtons("LeftButton", "RightButton") end)
+        end
+
+        marker.icon = marker:CreateTexture(nil, "ARTWORK")
+        marker.icon:SetAllPoints()
+
+        marker.countBadge = marker:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+        marker.countBadge:SetPoint("BOTTOMRIGHT", marker, "BOTTOMRIGHT", 2, -2)
+        marker.countBadge:SetJustifyH("RIGHT")
+
+        marker:SetScript("OnEnter", function(self)
+            if self.nodeData then
+                ShowCoalescedNodeTooltip(self, self.nodeData)
+            end
+        end)
+        marker:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+
+        mapMarkerPool[index] = marker
+    end
+    marker:SetParent(canvas)
+    marker:SetFrameStrata("HIGH")
+    marker:SetFrameLevel(80)
+    return marker
+end
+
+-- Updates World Map quest pins with dynamic zoom-aware icon coalescing & orderly buffered line layout
+local function UpdateWorldMapPins()
+    for _, marker in ipairs(mapMarkerPool) do
+        marker:Hide()
+    end
+
+    if not WorldMapFrame or not WorldMapFrame:IsShown() then return end
+
+    local activeCount = GetActiveFilterCount()
+    local mapID = WorldMapFrame:GetMapID()
+    local mapInfo = mapID and C_Map and C_Map.GetMapInfo and C_Map.GetMapInfo(mapID)
+    local isLocalZoneMap = (not mapInfo or not mapInfo.mapType or mapInfo.mapType >= 3)
+    local mapHeader = (mapInfo and mapInfo.name) or "Current Zone"
+    local canvas = WorldMapFrame.GetCanvas and WorldMapFrame:GetCanvas()
+
+    local cWidth = (canvas and canvas:GetWidth()) or 1000
+    local cHeight = (canvas and canvas:GetHeight()) or 668
+    local cScale = (WorldMapFrame.ScrollContainer and WorldMapFrame.ScrollContainer.GetCanvasScale and WorldMapFrame.ScrollContainer:GetCanvasScale())
+        or (canvas and canvas:GetScale()) or 1
+    if cScale <= 0 then cScale = 1 end
+
+    local nodesByReward = {}
+    local zoneRewardCounts = {}
+    wipe(activeZoneRewards)
+
+    ForEachWorldMapPin(function(pin)
+        local questID = GetPinQuestID(pin)
+        if questID and isLocalZoneMap then
+            if not questRewardMap[questID] then
+                ScanSingleQuestRewards(questID, nil, mapHeader, true)
+            end
+
+            local qData = questRewardMap[questID]
+            local matches = (activeCount == 0) or DoesQuestMatchFilter(questID)
+
+            -- Track all rewards available on the current zone map for the Top-Left Map Legend Overlay
+            if qData and qData.order then
+                for _, rID in ipairs(qData.order) do
+                    local det = qData.details and qData.details[rID]
+                    if det then
+                        if not zoneRewardCounts[rID] then
+                            zoneRewardCounts[rID] = {
+                                id = rID,
+                                name = det.name,
+                                icon = det.icon,
+                                category = det.categoryGroup or 5,
+                                count = 0
+                            }
+                            table.insert(activeZoneRewards, zoneRewardCounts[rID])
+                        end
+                        zoneRewardCounts[rID].count = zoneRewardCounts[rID].count + 1
+                    end
+                end
+            end
+
+            -- 1. Apply Map Pin Filtering (Dim or Hide non-matching quest pins)
+            if activeCount > 0 and filterMapPins then
+                if matches then
+                    pin:SetAlpha(1.0)
+                    if pin.qrfSuppressed then
+                        pin:EnableMouse(true)
+                        pin.qrfSuppressed = false
+                    end
+                else
+                    if hideUnmatchedMapPins then
+                        pin:SetAlpha(0.0)
+                        pin:EnableMouse(false)
+                        pin.qrfSuppressed = true
+                    else
+                        pin:SetAlpha(CONFIG.dimmedPinAlpha)
+                        if pin.qrfSuppressed then
+                            pin:EnableMouse(true)
+                            pin.qrfSuppressed = false
+                        end
+                    end
+                end
+            else
+                pin:SetAlpha(1.0)
+                if pin.qrfSuppressed then
+                    pin:EnableMouse(true)
+                    pin.qrfSuppressed = false
+                end
+            end
+
+            -- 2. Collect candidate icon nodes in zoomed screen-space pixels for coalescing
+            if showMapBadges and canvas and qData and #qData.order > 0 and (matches or not (activeCount > 0 and filterMapPins and hideUnmatchedMapPins)) then
+                local nx, ny = GetPinNormalizedPosition(pin, canvas)
+                if nx and ny then
+                    local visX = nx * cWidth * cScale
+                    local visY = (ny * cHeight * cScale) + CONFIG.pinUnderOffset
+
+                    local chosenRewards = {}
+                    if activeCount > 0 and matches then
+                        for _, rID in ipairs(qData.order) do
+                            if selectedFilters[rID] and #chosenRewards < 2 then
+                                table.insert(chosenRewards, rID)
+                            end
+                        end
+                    else
+                        local sortedRewards = {}
+                        for _, rID in ipairs(qData.order) do
+                            table.insert(sortedRewards, rID)
+                        end
+                        table.sort(sortedRewards, function(a, b)
+                            local catA = qData.categories[a] or 5
+                            local catB = qData.categories[b] or 5
+                            local prioA = MAP_BADGE_CATEGORY_PRIORITY[catA] or 9
+                            local prioB = MAP_BADGE_CATEGORY_PRIORITY[catB] or 9
+                            if prioA ~= prioB then return prioA < prioB end
+                            return tostring(a) < tostring(b)
+                        end)
+                        for _, rID in ipairs(sortedRewards) do
+                            if #chosenRewards < 2 and (rID ~= "GOLD" or #sortedRewards == 1) then
+                                table.insert(chosenRewards, rID)
+                            end
+                        end
+                    end
+
+                    for _, rID in ipairs(chosenRewards) do
+                        local det = qData.details and qData.details[rID]
+                        if det then
+                            nodesByReward[rID] = nodesByReward[rID] or {}
+                            table.insert(nodesByReward[rID], {
+                                rID = rID,
+                                name = det.name,
+                                icon = det.icon,
+                                category = det.categoryGroup or 5,
+                                visX = visX,
+                                visY = visY,
+                                quests = {
+                                    { questID = questID, amount = det.amount or 1 }
+                                }
+                            })
+                        end
+                    end
+                end
+            end
+        else
+            if pin.qrfSuppressed then
+                pin:SetAlpha(1.0)
+                pin:EnableMouse(true)
+                pin.qrfSuppressed = false
+            end
+        end
+    end)
+
+    -- Sort activeZoneRewards for the Top-Left Map Legend Overlay
+    table.sort(activeZoneRewards, function(a, b)
+        local prioA = MAP_BADGE_CATEGORY_PRIORITY[a.category] or 9
+        local prioB = MAP_BADGE_CATEGORY_PRIORITY[b.category] or 9
+        if prioA ~= prioB then return prioA < prioB end
+        return (a.name or "") < (b.name or "")
+    end)
+
+    UpdateMapLegendUI(activeZoneRewards, isLocalZoneMap)
+
+    if not showMapBadges or not isLocalZoneMap or not canvas then return end
+
+    -- PHASE 1: Coalesce colliding icons of the SAME reward type based on current zoom scale
+    local coalesceDist = CONFIG.mapIconSize + CONFIG.coalescePadding
+    local coalesceDistSq = coalesceDist * coalesceDist
+    local allCoalescedNodes = {}
+
+    for _, list in pairs(nodesByReward) do
+        local merged = true
+        while merged and #list > 1 do
+            merged = false
+            local bestI, bestJ, bestD2 = nil, nil, coalesceDistSq
+            for i = 1, #list - 1 do
+                for j = i + 1, #list do
+                    local dx = list[i].visX - list[j].visX
+                    local dy = list[i].visY - list[j].visY
+                    local d2 = (dx * dx) + (dy * dy)
+                    if d2 <= bestD2 then
+                        bestD2 = d2
+                        bestI = i
+                        bestJ = j
+                    end
+                end
+            end
+
+            if bestI and bestJ then
+                local nodeA = list[bestI]
+                local nodeB = list[bestJ]
+                local wA = #nodeA.quests
+                local wB = #nodeB.quests
+                local totalW = wA + wB
+
+                nodeA.visX = ((nodeA.visX * wA) + (nodeB.visX * wB)) / totalW
+                nodeA.visY = ((nodeA.visY * wA) + (nodeB.visY * wB)) / totalW
+
+                local seenQ = {}
+                for _, q in ipairs(nodeA.quests) do seenQ[q.questID] = true end
+                for _, q in ipairs(nodeB.quests) do
+                    if not seenQ[q.questID] then
+                        table.insert(nodeA.quests, q)
+                    end
+                end
+
+                table.remove(list, bestJ)
+                merged = true
+            end
+        end
+
+        for _, survivingNode in ipairs(list) do
+            table.insert(allCoalescedNodes, survivingNode)
+        end
+    end
+
+    -- PHASE 2: When multiple coalesced/different-type icons collide, approximate their shared center
+    -- and arrange them orderly in a horizontal line with a clean buffer gap
+    local stride = CONFIG.mapIconSize + CONFIG.mapIconBuffer
+    local visited = {}
+
+    for i = 1, #allCoalescedNodes do
+        if not visited[i] then
+            local group = { allCoalescedNodes[i] }
+            visited[i] = true
+            local queue = { i }
+
+            while #queue > 0 do
+                local currIdx = table.remove(queue, 1)
+                local currNode = allCoalescedNodes[currIdx]
+                for j = 1, #allCoalescedNodes do
+                    if not visited[j] then
+                        local otherNode = allCoalescedNodes[j]
+                        if math.abs(currNode.visX - otherNode.visX) < stride and math.abs(currNode.visY - otherNode.visY) < stride then
+                            visited[j] = true
+                            table.insert(group, otherNode)
+                            table.insert(queue, j)
+                        end
+                    end
+                end
+            end
+
+            if #group == 1 then
+                group[1].finalX = group[1].visX
+                group[1].finalY = group[1].visY
+            else
+                local sumX, sumY = 0, 0
+                for _, n in ipairs(group) do
+                    sumX = sumX + n.visX
+                    sumY = sumY + n.visY
+                end
+                local centerX = sumX / #group
+                local centerY = sumY / #group
+
+                table.sort(group, function(a, b)
+                    local prioA = MAP_BADGE_CATEGORY_PRIORITY[a.category] or 9
+                    local prioB = MAP_BADGE_CATEGORY_PRIORITY[b.category] or 9
+                    if prioA ~= prioB then return prioA < prioB end
+                    return tostring(a.rID) < tostring(b.rID)
+                end)
+
+                local startX = centerX - ((#group - 1) * stride * 0.5)
+                for idx, n in ipairs(group) do
+                    n.finalX = startX + ((idx - 1) * stride)
+                    n.finalY = centerY
+                end
+            end
+        end
+    end
+
+    -- PHASE 3: Render the coalesced & buffered icon markers onto the World Map canvas
+    local invScale = 1 / cScale
+    for idx, node in ipairs(allCoalescedNodes) do
+        local marker = GetOrCreateMapMarker(idx, canvas)
+        marker:SetScale(invScale)
+        marker:ClearAllPoints()
+        marker:SetPoint("CENTER", canvas, "TOPLEFT", node.finalX, -node.finalY)
+        marker.icon:SetTexture(node.icon or 134400)
+        marker.nodeData = node
+
+        if #node.quests > 1 then
+            marker.countBadge:SetText("|cFFFFD100" .. #node.quests .. "|r")
+            marker.countBadge:Show()
+        else
+            marker.countBadge:SetText("")
+            marker.countBadge:Hide()
+        end
+
+        marker:Show()
+    end
 end
 
 -- Synchronizes the on-screen Objective Tracker based on active filters
@@ -438,7 +1166,6 @@ local function UpdateAllButtonLabels()
         end
     end
 
-    -- 1. Update Quest Log Bar
     if questLogBar then
         if activeCount == 0 then
             questLogBar.dropdownBtn:SetText(CONFIG.QUESTLOG_BTN_ALL)
@@ -456,7 +1183,6 @@ local function UpdateAllButtonLabels()
         end
     end
 
-    -- 2. Update Objective Tracker "All Objectives" Banner Button
     if trackerFilterBtn then
         if activeCount == 0 then
             trackerFilterBtn:SetText(CONFIG.TRACKER_BTN_ALL)
@@ -469,14 +1195,14 @@ local function UpdateAllButtonLabels()
     end
 end
 
--- Renders the flat, clean override list in the Quest Log when filters are active
+-- Renders the flat override list in the Quest Log with vertically stacked [Quantity] [Icon] [Currency Name] lines
 local function RenderCustomFilteredList()
     if not QuestScrollFrame or not QuestScrollFrame.qrfCustomList then return end
     local listFrame = QuestScrollFrame.qrfCustomList
 
     wipe(matchingQuestsList)
     for questID, qData in pairs(questRewardMap) do
-        if DoesQuestMatchFilter(questID) then
+        if not qData.isMapQuest and DoesQuestMatchFilter(questID) then
             table.insert(matchingQuestsList, qData)
         end
     end
@@ -493,12 +1219,15 @@ local function RenderCustomFilteredList()
         customScrollOffset = math.max(0, totalMatches - MAX_CUSTOM_ROWS)
     end
 
+    local yCursor = -28
+    local listBottomLimit = -(listFrame:GetHeight() - 24)
+
     for i = 1, MAX_CUSTOM_ROWS do
         local row = customListRowPool[i]
         local dataIndex = i + customScrollOffset
         local qData = matchingQuestsList[dataIndex]
 
-        if qData then
+        if qData and yCursor > listBottomLimit then
             local badgeParts = {}
             for _, rID in ipairs(qData.order) do
                 if selectedFilters[rID] then
@@ -509,7 +1238,15 @@ local function RenderCustomFilteredList()
             local watchedIcon = IsQuestWatched(qData.questID) and "|TInterface\\RaidFrame\\ReadyCheck-Ready:13:13:0:0|t " or ""
             row.titleText:SetText(watchedIcon .. "|cFFFFFFFF" .. qData.title .. "|r")
             row.zoneText:SetText("|cFF888888" .. qData.header .. "|r")
-            row.badgeText:SetText(table.concat(badgeParts, " "))
+            row.badgeText:SetText(table.concat(badgeParts, "\n"))
+
+            local textH = row.badgeText:GetStringHeight() or 14
+            local dynamicHeight = math.max(44, 32 + textH + 6)
+            row:SetHeight(dynamicHeight)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", listFrame, "TOPLEFT", 8, yCursor)
+            row:SetPoint("TOPRIGHT", listFrame, "TOPRIGHT", -8, yCursor)
+            yCursor = yCursor - (dynamicHeight + 2)
 
             row:SetScript("OnClick", function()
                 if IsShiftKeyDown() then
@@ -543,10 +1280,39 @@ local function RenderCustomFilteredList()
     end
 end
 
--- Master UI update
+-- Acquires or creates a VerticalLayoutFrame-compatible reward row inside QuestScrollFrame.Contents
+local function GetOrCreateQuestLogRewardRow(index, parentContents)
+    local row = questLogRewardRowPool[index]
+    if not row then
+        row = CreateFrame("Frame", nil, parentContents)
+        row:SetWidth(230)
+        row.isQrfRewardRow = true
+        row.leftPadding = 29
+        row.topPadding = 2
+        row.bottomPadding = 4
+
+        row.text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        row.text:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
+        row.text:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        row.text:SetJustifyH("LEFT")
+        row.text:SetSpacing(2)
+
+        questLogRewardRowPool[index] = row
+    end
+    row:SetParent(parentContents)
+    return row
+end
+
+-- Master UI update (Injects vertically stacked reward rows below each quest's objectives in QuestScrollFrame.Contents)
 local function UpdateQuestLogUI()
     ScanQuestLogRewards()
     UpdateAllButtonLabels()
+    UpdateWorldMapPins()
+
+    for _, rRow in ipairs(questLogRewardRowPool) do
+        rRow:Hide()
+        rRow.layoutIndex = nil
+    end
 
     if not QuestScrollFrame then return end
 
@@ -563,40 +1329,91 @@ local function UpdateQuestLogUI()
             customList:Hide()
         end
 
-        if QuestScrollFrame.titleFramePool then
+        local contents = QuestScrollFrame.Contents
+        if contents and QuestScrollFrame.titleFramePool then
+            local isObjective = {}
+            if QuestScrollFrame.objectiveFramePool then
+                for obj in QuestScrollFrame.objectiveFramePool:EnumerateActive() do
+                    isObjective[obj] = true
+                end
+            end
+
+            local nonObjectiveIndices = {}
+            local objectiveIndices = {}
+            local children = { contents:GetChildren() }
+            for _, child in ipairs(children) do
+                if child:IsShown() and type(child.layoutIndex) == "number" and not child.isQrfRewardRow then
+                    if isObjective[child] then
+                        table.insert(objectiveIndices, child.layoutIndex)
+                    else
+                        table.insert(nonObjectiveIndices, child.layoutIndex)
+                    end
+                end
+            end
+            table.sort(nonObjectiveIndices)
+            table.sort(objectiveIndices)
+
+            local rowPoolIdx = 0
+
             for button in QuestScrollFrame.titleFramePool:EnumerateActive() do
                 if button then
-                    if not button.qrfBadge then
-                        button.qrfBadge = button:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                        button.qrfBadge:SetPoint("RIGHT", button, "RIGHT", -6, 0)
-                        button.qrfBadge:SetJustifyH("RIGHT")
+                    if button.qrfBadge then
+                        button.qrfBadge:Hide()
                     end
 
                     local questID = button.questID or (button.info and button.info.questID)
                     local qData = questID and questRewardMap[questID]
+                    local bLayoutIdx = button.layoutIndex
 
-                    if questID and not (button.info and button.info.isHeader) and qData then
+                    if CONFIG.showDefaultLogBadges and questID and type(bLayoutIdx) == "number" and not (button.info and button.info.isHeader) and qData then
                         local badgeParts = {}
                         for _, rID in ipairs(qData.order) do
-                            if #badgeParts < 3 and (rID ~= "GOLD" or #qData.order == 1) then
+                            if #badgeParts < 4 and (rID ~= "GOLD" or #qData.order == 1) then
                                 table.insert(badgeParts, qData.badges[rID])
                             end
                         end
-                        button.qrfBadge:SetText(table.concat(badgeParts, " "))
-                        button.qrfBadge:Show()
-                    else
-                        button.qrfBadge:SetText("")
-                        button.qrfBadge:Hide()
+
+                        if #badgeParts > 0 then
+                            local nextMajorIdx = math.huge
+                            for _, majorIdx in ipairs(nonObjectiveIndices) do
+                                if majorIdx > bLayoutIdx then
+                                    nextMajorIdx = majorIdx
+                                    break
+                                end
+                            end
+
+                            local lastQuestElementIdx = bLayoutIdx
+                            for _, objIdx in ipairs(objectiveIndices) do
+                                if objIdx > bLayoutIdx and objIdx < nextMajorIdx then
+                                    if objIdx > lastQuestElementIdx then
+                                        lastQuestElementIdx = objIdx
+                                    end
+                                end
+                            end
+
+                            rowPoolIdx = rowPoolIdx + 1
+                            local rewardRow = GetOrCreateQuestLogRewardRow(rowPoolIdx, contents)
+                            rewardRow.layoutIndex = lastQuestElementIdx + 0.5
+                            rewardRow.text:SetText(table.concat(badgeParts, "\n"))
+
+                            local textH = rewardRow.text:GetStringHeight() or (#badgeParts * 15)
+                            rewardRow:SetHeight(math.max(14, textH + 2))
+                            rewardRow:Show()
+                        end
                     end
                     button:SetAlpha(1.0)
                 end
+            end
+
+            if contents.Layout then
+                contents:Layout()
             end
         end
     end
 end
 
 -- Applies filter changes and saves state
-local function ApplyFilterChanges()
+ApplyFilterChanges = function()
     customScrollOffset = 0
     ScanQuestLogRewards()
     SyncObjectiveTracker()
@@ -605,7 +1422,7 @@ local function ApplyFilterChanges()
 end
 
 -- Populates the categorized, collapsible multi-select dropdown menu
-local function RebuildDropdownMenu(menuFrame, searchJustChanged)
+RebuildDropdownMenu = function(menuFrame, searchJustChanged)
     if not menuFrame then return end
     ScanQuestLogRewards()
     wipe(dropdownDisplayList)
@@ -857,21 +1674,42 @@ local function RebuildDropdownMenu(menuFrame, searchJustChanged)
     menuFrame.footerDivider:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 6, yOffset - 4)
     menuFrame.footerDivider:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -6, yOffset - 4)
 
-    menuFrame.untrackRow:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 6, yOffset - 8)
+    -- Row 1: Show Map reward icons (coalesced zoom-aware badges)
+    local footerY = yOffset - 8
+    menuFrame.mapBadgeRow:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 6, footerY)
+    menuFrame.mapBadgeRow:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -8, footerY)
+    menuFrame.mapBadgeRow.check:SetChecked(showMapBadges)
+
+    -- Row 2: Show Map Legend overlay in top-left corner
+    footerY = footerY - 20
+    menuFrame.mapLegendRow:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 6, footerY)
+    menuFrame.mapLegendRow:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -8, footerY)
+    menuFrame.mapLegendRow.check:SetChecked(showMapLegend)
+
+    -- Row 3: Filter Local Map Pins + [Dim] / [Hide] mode toggle
+    footerY = footerY - 20
+    menuFrame.mapFilterRow:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 6, footerY)
+    menuFrame.mapFilterRow:SetPoint("RIGHT", menuFrame.mapModeBtn, "LEFT", -4, 0)
+    menuFrame.mapFilterRow.check:SetChecked(filterMapPins)
+    menuFrame.mapModeBtn:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -8, footerY - 2)
+    menuFrame.mapModeBtn:SetText(hideUnmatchedMapPins and "Mode: Hide" or "Mode: Dim")
+
+    -- Row 4: Auto-untrack others + Done button
+    footerY = footerY - 20
+    menuFrame.untrackRow:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 6, footerY)
     menuFrame.untrackRow:SetPoint("RIGHT", menuFrame.doneBtn, "LEFT", -4, 0)
     menuFrame.untrackRow.check:SetChecked(autoUntrack)
-
-    menuFrame.doneBtn:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -8, yOffset - 9)
+    menuFrame.doneBtn:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -8, footerY - 1)
 
     local finalWidth = math.min(math.max(maxWidth, 270), 305)
-    menuFrame:SetSize(finalWidth, math.abs(yOffset) + 38)
+    menuFrame:SetSize(finalWidth, math.abs(footerY) + 30)
 
     if menuFrame.bgLeft then
         menuFrame.bgLeft:SetWidth(math.floor(finalWidth * 0.75))
     end
 end
 
--- Resets all active filters and restores tracked quests
+-- Resets all active filters and restores tracked quests & map pins
 local function ResetAllFilters()
     wipe(selectedFilters)
     dropdownSearchText = ""
@@ -941,7 +1779,6 @@ local function EnsureSharedMenu()
         end
     end)
 
-    -- Zone 1 (Left 75%): 97% Solid dark
     local bgLeft = menuFrame:CreateTexture(nil, "BACKGROUND")
     bgLeft:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 0, 0)
     bgLeft:SetPoint("BOTTOMLEFT", menuFrame, "BOTTOMLEFT", 0, 0)
@@ -949,7 +1786,6 @@ local function EnsureSharedMenu()
     bgLeft:SetColorTexture(0.05, 0.05, 0.07, 0.97)
     menuFrame.bgLeft = bgLeft
 
-    -- Zone 2 (Right 25%): Smoothly fades from 97% down to 45% opacity
     local bgRight = menuFrame:CreateTexture(nil, "BACKGROUND")
     bgRight:SetPoint("TOPLEFT", bgLeft, "TOPRIGHT", 0, 0)
     bgRight:SetPoint("BOTTOMRIGHT", menuFrame, "BOTTOMRIGHT", 0, 0)
@@ -1032,6 +1868,72 @@ local function EnsureSharedMenu()
     ApplyHorizontalGradient(footerLine, 0.4, 0.4, 0.45, 0.9, 0.25)
     menuFrame.footerDivider = footerLine
 
+    -- Footer Option 1: Show Map reward icons
+    local mapBadgeRow = CreateFrame("Button", nil, menuFrame)
+    mapBadgeRow:SetHeight(20)
+    mapBadgeRow.check = CreateFrame("CheckButton", nil, mapBadgeRow, "UICheckButtonTemplate")
+    mapBadgeRow.check:SetSize(20, 20)
+    mapBadgeRow.check:SetPoint("LEFT", mapBadgeRow, "LEFT", 2, 0)
+    mapBadgeRow.check:SetMouseClickEnabled(false)
+    mapBadgeRow.label = mapBadgeRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    mapBadgeRow.label:SetPoint("LEFT", mapBadgeRow.check, "RIGHT", 2, 0)
+    mapBadgeRow.label:SetText("|cFFDDDDDDShow Map reward icons|r")
+    mapBadgeRow:SetScript("OnClick", function()
+        showMapBadges = not showMapBadges
+        mapBadgeRow.check:SetChecked(showMapBadges)
+        UpdateWorldMapPins()
+        SaveState()
+    end)
+    menuFrame.mapBadgeRow = mapBadgeRow
+
+    -- Footer Option 2: Show Map Legend overlay in top-left corner
+    local mapLegendRow = CreateFrame("Button", nil, menuFrame)
+    mapLegendRow:SetHeight(20)
+    mapLegendRow.check = CreateFrame("CheckButton", nil, mapLegendRow, "UICheckButtonTemplate")
+    mapLegendRow.check:SetSize(20, 20)
+    mapLegendRow.check:SetPoint("LEFT", mapLegendRow, "LEFT", 2, 0)
+    mapLegendRow.check:SetMouseClickEnabled(false)
+    mapLegendRow.label = mapLegendRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    mapLegendRow.label:SetPoint("LEFT", mapLegendRow.check, "RIGHT", 2, 0)
+    mapLegendRow.label:SetText("|cFFDDDDDDShow Map Legend overlay|r")
+    mapLegendRow:SetScript("OnClick", function()
+        showMapLegend = not showMapLegend
+        mapLegendRow.check:SetChecked(showMapLegend)
+        UpdateWorldMapPins()
+        SaveState()
+    end)
+    menuFrame.mapLegendRow = mapLegendRow
+
+    -- Footer Option 3: Filter Local Map Pins + [Mode: Dim / Hide] button
+    local mapFilterRow = CreateFrame("Button", nil, menuFrame)
+    mapFilterRow:SetHeight(20)
+    mapFilterRow.check = CreateFrame("CheckButton", nil, mapFilterRow, "UICheckButtonTemplate")
+    mapFilterRow.check:SetSize(20, 20)
+    mapFilterRow.check:SetPoint("LEFT", mapFilterRow, "LEFT", 2, 0)
+    mapFilterRow.check:SetMouseClickEnabled(false)
+    mapFilterRow.label = mapFilterRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    mapFilterRow.label:SetPoint("LEFT", mapFilterRow.check, "RIGHT", 2, 0)
+    mapFilterRow.label:SetText("|cFFDDDDDDFilter Map pins|r")
+    mapFilterRow:SetScript("OnClick", function()
+        filterMapPins = not filterMapPins
+        mapFilterRow.check:SetChecked(filterMapPins)
+        UpdateWorldMapPins()
+        SaveState()
+    end)
+    menuFrame.mapFilterRow = mapFilterRow
+
+    local mapModeBtn = CreateFrame("Button", nil, menuFrame, "UIPanelButtonTemplate")
+    mapModeBtn:SetSize(68, 18)
+    mapModeBtn:SetText(hideUnmatchedMapPins and "Mode: Hide" or "Mode: Dim")
+    mapModeBtn:SetScript("OnClick", function(self)
+        hideUnmatchedMapPins = not hideUnmatchedMapPins
+        self:SetText(hideUnmatchedMapPins and "Mode: Hide" or "Mode: Dim")
+        UpdateWorldMapPins()
+        SaveState()
+    end)
+    menuFrame.mapModeBtn = mapModeBtn
+
+    -- Footer Option 4: Auto-untrack others + Done button
     local doneBtn = CreateFrame("Button", nil, menuFrame, "UIPanelButtonTemplate")
     doneBtn:SetSize(52, 20)
     doneBtn:SetText("Done")
@@ -1041,17 +1943,14 @@ local function EnsureSharedMenu()
     menuFrame.doneBtn = doneBtn
 
     local untrackRow = CreateFrame("Button", nil, menuFrame)
-    untrackRow:SetHeight(22)
-
+    untrackRow:SetHeight(20)
     untrackRow.check = CreateFrame("CheckButton", nil, untrackRow, "UICheckButtonTemplate")
     untrackRow.check:SetSize(20, 20)
     untrackRow.check:SetPoint("LEFT", untrackRow, "LEFT", 2, 0)
     untrackRow.check:SetMouseClickEnabled(false)
-
     untrackRow.label = untrackRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     untrackRow.label:SetPoint("LEFT", untrackRow.check, "RIGHT", 2, 0)
     untrackRow.label:SetText("|cFFDDDDDDAuto-untrack others|r")
-
     untrackRow:SetScript("OnClick", function()
         autoUntrack = not autoUntrack
         untrackRow.check:SetChecked(autoUntrack)
@@ -1157,9 +2056,7 @@ local function CreateQuestLogUI()
 
     for i = 1, MAX_CUSTOM_ROWS do
         local row = CreateFrame("Button", nil, customList)
-        row:SetHeight(32)
-        row:SetPoint("TOPLEFT", customList, "TOPLEFT", 8, -28 - ((i - 1) * 33))
-        row:SetPoint("TOPRIGHT", customList, "TOPRIGHT", -8, -28 - ((i - 1) * 33))
+        row:SetHeight(48)
 
         row.bg = row:CreateTexture(nil, "BACKGROUND")
         row.bg:SetAllPoints()
@@ -1169,19 +2066,26 @@ local function CreateQuestLogUI()
         row.highlight:SetAllPoints()
         row.highlight:SetColorTexture(0.3, 0.6, 1.0, 0.18)
 
+        -- Line 1 (Top-Left): Quest Title
         row.titleText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         row.titleText:SetPoint("TOPLEFT", row, "TOPLEFT", 6, -4)
-        row.titleText:SetPoint("RIGHT", row, "RIGHT", -95, 0)
+        row.titleText:SetPoint("RIGHT", row, "RIGHT", -6, 0)
         row.titleText:SetJustifyH("LEFT")
         row.titleText:SetWordWrap(false)
 
+        -- Line 2 (Middle-Left): Zone / Campaign Description
         row.zoneText = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        row.zoneText:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 6, 4)
+        row.zoneText:SetPoint("TOPLEFT", row.titleText, "BOTTOMLEFT", 0, -2)
+        row.zoneText:SetPoint("RIGHT", row, "RIGHT", -6, 0)
         row.zoneText:SetJustifyH("LEFT")
+        row.zoneText:SetWordWrap(false)
 
+        -- Line 3+ (Vertically stacked below description): [Quantity] [Icon] [Currency Name]
         row.badgeText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        row.badgeText:SetPoint("TOPLEFT", row.zoneText, "BOTTOMLEFT", 0, -3)
         row.badgeText:SetPoint("RIGHT", row, "RIGHT", -6, 0)
-        row.badgeText:SetJustifyH("RIGHT")
+        row.badgeText:SetJustifyH("LEFT")
+        row.badgeText:SetSpacing(2)
 
         customListRowPool[i] = row
     end
@@ -1221,17 +2125,63 @@ local function CreateQuestLogUI()
     UpdateAllButtonLabels()
 end
 
--- Initialize and hook into Quest Log & Objective Tracker updates
+-- Hooks into WorldMapFrame & ScrollContainer zoom so zooming dynamically coalesces/separates icons
+local function HookWorldMap()
+    if not WorldMapFrame or WorldMapFrame.qrfHooked then return end
+    WorldMapFrame.qrfHooked = true
+
+    WorldMapFrame:HookScript("OnShow", function()
+        UpdateQuestLogUI()
+    end)
+
+    if WorldMapFrame.OnMapChanged then
+        hooksecurefunc(WorldMapFrame, "OnMapChanged", function()
+            UpdateQuestLogUI()
+            if sharedMenuFrame and sharedMenuFrame:IsShown() then
+                RebuildDropdownMenu(sharedMenuFrame, false)
+            end
+        end)
+    end
+
+    if WorldMapFrame.RefreshAllDataProviders then
+        hooksecurefunc(WorldMapFrame, "RefreshAllDataProviders", function()
+            UpdateWorldMapPins()
+        end)
+    end
+
+    -- Monitor live canvas zoom scale changes so coalesced icons split/merge smoothly as you zoom
+    if WorldMapFrame.ScrollContainer and not mapOverlayHolder then
+        mapOverlayHolder = CreateFrame("Frame", nil, WorldMapFrame.ScrollContainer)
+        local lastScale = 0
+        local elapsedAccum = 0
+        mapOverlayHolder:SetScript("OnUpdate", function(_, elapsed)
+            elapsedAccum = elapsedAccum + elapsed
+            if elapsedAccum < 0.05 then return end
+            elapsedAccum = 0
+            if WorldMapFrame:IsShown() and WorldMapFrame.ScrollContainer.GetCanvasScale then
+                local curScale = WorldMapFrame.ScrollContainer:GetCanvasScale() or 1
+                if math.abs(curScale - lastScale) > 0.002 then
+                    lastScale = curScale
+                    UpdateWorldMapPins()
+                end
+            end
+        end)
+    end
+end
+
+-- Initialize and hook into Quest Log, World Map & Objective Tracker updates
 local loader = CreateFrame("Frame")
 loader:RegisterEvent("ADDON_LOADED")
 loader:RegisterEvent("PLAYER_ENTERING_WORLD")
 loader:RegisterEvent("QUEST_LOG_UPDATE")
-loader:SetScript("OnEvent", function(self, event, arg1)
+loader:RegisterEvent("QUEST_DATA_LOAD_RESULT")
+loader:SetScript("OnEvent", function(self, event, arg1, arg2)
     if event == "ADDON_LOADED" then
         LoadState()
     elseif event == "PLAYER_ENTERING_WORLD" then
         CreateQuestLogUI()
         CreateObjectiveTrackerButton()
+        HookWorldMap()
         if QuestLogQuests_Update then
             hooksecurefunc("QuestLogQuests_Update", UpdateQuestLogUI)
         end
@@ -1243,6 +2193,19 @@ loader:SetScript("OnEvent", function(self, event, arg1)
             if sharedMenuFrame and sharedMenuFrame:IsShown() then
                 RebuildDropdownMenu(sharedMenuFrame, false)
             end
+        end
+    elseif event == "QUEST_DATA_LOAD_RESULT" then
+        if arg2 and not preloadRefreshPending and C_Timer and C_Timer.After then
+            preloadRefreshPending = true
+            C_Timer.After(0.15, function()
+                preloadRefreshPending = false
+                if not isSyncingTracker then
+                    UpdateQuestLogUI()
+                    if sharedMenuFrame and sharedMenuFrame:IsShown() then
+                        RebuildDropdownMenu(sharedMenuFrame, false)
+                    end
+                end
+            end)
         end
     end
 end)

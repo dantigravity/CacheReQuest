@@ -13,6 +13,7 @@ local CONFIG = {
     coalescePadding      = 10,   -- Extra pixel radius within which same-type map icons coalesce
     pinUnderOffset       = 18,   -- Vertical offset (px) placing icons below their quest pin
     logIconSize          = 14,   -- Icon size (px) for Quest Log vertical reward lines
+    logIconOffsetY       = 0,    -- Fine-tune vertical icon offset (px) relative to Quest Log text
     showDefaultLogBadges = true, -- Show stacked reward lines in the unfiltered Quest Log
 }
 -- ============================================================================
@@ -245,15 +246,106 @@ local function ApplyHorizontalGradient(tex, r, g, b, leftAlpha, rightAlpha)
     end
 end
 
--- Formats a single Quest Log reward line: [Quantity] [Icon] [Currency/Reward Name]
+-- Formats a fallback Quest Log reward line: [Quantity] [Icon] [Currency/Reward Name]
 local function FormatQuestLogRewardLine(amount, icon, name, isGold, isCurrency)
     local iconSz = CONFIG.logIconSize or 14
     local amtNum = amount or 1
     local amtFormatted = BreakUpLargeNumbers and BreakUpLargeNumbers(amtNum) or tostring(amtNum)
     local qtyColor = isGold and "|cFFFFD700" or (isCurrency and "|cFF00CCFF" or "|cFFFFFFFF")
     local nameColor = isGold and "|cFFFFD700" or "|cFFE6E6E6"
-    local iconTag = "|T" .. tostring(icon or 134400) .. ":" .. iconSz .. ":" .. iconSz .. ":0:0|t"
-    return string.format("%s%s|r  %s  %s%s|r", qtyColor, amtFormatted, iconTag, nameColor, name or "Reward")
+    local iconTag = "|T" .. tostring(icon or 134400) .. ":" .. iconSz .. ":" .. iconSz .. ":0:-2|t"
+    return string.format("%s%s|r %s %s%s|r", qtyColor, amtFormatted, iconTag, nameColor, name or "Reward")
+end
+
+-- Creates or updates a single aligned [Quantity] [Icon] [Name] sub-line inside a Quest Log reward container
+local function EnsureAlignedRewardLine(container, index)
+    container.rewardLines = container.rewardLines or {}
+    local line = container.rewardLines[index]
+    if not line then
+        line = CreateFrame("Frame", nil, container)
+        line:SetHeight(16)
+
+        line.qtyText = line:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        line.qtyText:SetJustifyH("LEFT")
+        line.qtyText:SetWordWrap(false)
+
+        line.icon = line:CreateTexture(nil, "ARTWORK")
+        line.icon:SetSize(CONFIG.logIconSize or 14, CONFIG.logIconSize or 14)
+
+        line.nameText = line:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        line.nameText:SetJustifyH("LEFT")
+        line.nameText:SetWordWrap(false)
+
+        container.rewardLines[index] = line
+    end
+    return line
+end
+
+-- Populates vertically stacked, center-aligned [Quantity] [Icon] [Currency Name] rows inside a container
+local function LayoutAlignedRewardLines(container, qData, rewardIDList, topOffset, leftIndent)
+    if container.rewardLines then
+        for _, l in ipairs(container.rewardLines) do
+            l:Hide()
+        end
+    end
+
+    if not qData or not rewardIDList or #rewardIDList == 0 then
+        return 0
+    end
+
+    local iconSz = CONFIG.logIconSize or 14
+    local lineH = math.max(iconSz + 2, 16)
+    local iconY = CONFIG.logIconOffsetY or 0
+    local maxQtyW = 0
+
+    -- Pass 1: Set text strings and measure the widest quantity so icons align in a straight vertical column
+    for idx, rID in ipairs(rewardIDList) do
+        local det = qData.details and qData.details[rID]
+        local line = EnsureAlignedRewardLine(container, idx)
+        line:SetHeight(lineH)
+        line.icon:SetSize(iconSz, iconSz)
+
+        local amtNum = (det and det.amount) or 1
+        local amtFormatted = BreakUpLargeNumbers and BreakUpLargeNumbers(amtNum) or tostring(amtNum)
+        local isGold = (rID == "GOLD")
+        local isCurr = (det and det.isCurrency) == true
+
+        local qtyColor = isGold and "|cFFFFD700" or (isCurr and "|cFF00CCFF" or "|cFFFFFFFF")
+        local nameColor = isGold and "|cFFFFD700" or "|cFFE6E6E6"
+
+        line.qtyText:SetText(qtyColor .. amtFormatted .. "|r")
+        line.icon:SetTexture((det and det.icon) or 134400)
+        line.nameText:SetText(nameColor .. ((det and det.name) or "Reward") .. "|r")
+
+        local w = line.qtyText:GetStringWidth() or 12
+        if w > maxQtyW then
+            maxQtyW = w
+        end
+    end
+
+    -- Pass 2: Anchor quantity, icon, and currency name on the exact same vertical center line
+    for idx = 1, #rewardIDList do
+        local line = container.rewardLines[idx]
+        local yPos = -(topOffset or 0) - ((idx - 1) * lineH)
+
+        line:ClearAllPoints()
+        line:SetPoint("TOPLEFT", container, "TOPLEFT", leftIndent or 0, yPos)
+        line:SetPoint("RIGHT", container, "RIGHT", -4, 0)
+
+        line.qtyText:ClearAllPoints()
+        line.qtyText:SetPoint("LEFT", line, "LEFT", 0, 0)
+
+        line.icon:ClearAllPoints()
+        line.icon:SetPoint("LEFT", line, "LEFT", maxQtyW + 5, iconY)
+
+        line.nameText:ClearAllPoints()
+        line.nameText:SetPoint("LEFT", line.icon, "RIGHT", 5, -iconY)
+        line.nameText:SetPoint("RIGHT", line, "RIGHT", 0, 0)
+
+        line:Show()
+    end
+
+    return (#rewardIDList * lineH)
 end
 
 -- Shows tooltip for a single or coalesced World Map reward icon
@@ -397,7 +489,7 @@ local function ResolveQuestTitle(questID, fallbackTitle)
 end
 
 -- Registers a single reward into questRewardMap and availableRewards
-local function RegisterReward(questID, title, header, rewardID, name, icon, categoryGroup, sortPriority, logLineStr, amount, isMapQuest)
+local function RegisterReward(questID, title, header, rewardID, name, icon, categoryGroup, sortPriority, logLineStr, amount, isMapQuest, isCurrency)
     knownRewardMeta[rewardID] = {
         id = rewardID,
         name = name,
@@ -427,7 +519,8 @@ local function RegisterReward(questID, title, header, rewardID, name, icon, cate
             name = name,
             icon = icon,
             amount = amount or 1,
-            categoryGroup = categoryGroup
+            categoryGroup = categoryGroup,
+            isCurrency = isCurrency == true
         }
         questRewardMap[questID].categories[rewardID] = categoryGroup
         table.insert(questRewardMap[questID].order, rewardID)
@@ -474,7 +567,7 @@ local function ScanSingleQuestRewards(questID, qTitle, headerName, isMapQuest)
                 catGroup = 3
             end
 
-            RegisterReward(questID, resolvedTitle, headerName, cID, cName, cIcon, catGroup, 1, logLine, amt, isMapQuest)
+            RegisterReward(questID, resolvedTitle, headerName, cID, cName, cIcon, catGroup, 1, logLine, amt, isMapQuest, true)
         end
     end
 
@@ -485,7 +578,7 @@ local function ScanSingleQuestRewards(questID, qTitle, headerName, isMapQuest)
             local icon = tex or 132739
             local eqName = name or "Equipment & Weapons"
             local logLine = FormatQuestLogRewardLine(numItems or 1, icon, eqName, false, false)
-            RegisterReward(questID, resolvedTitle, headerName, "ITEM_GEAR", "Equipment & Weapons", icon, 5, 1, logLine, numItems or 1, isMapQuest)
+            RegisterReward(questID, resolvedTitle, headerName, "ITEM_GEAR", "Equipment & Weapons", icon, 5, 1, logLine, numItems or 1, isMapQuest, false)
         else
             if itemID and not name and C_Item and C_Item.RequestLoadItemDataByID then
                 C_Item.RequestLoadItemDataByID(itemID)
@@ -504,7 +597,7 @@ local function ScanSingleQuestRewards(questID, qTitle, headerName, isMapQuest)
                 catGroup = 3
             end
 
-            RegisterReward(questID, resolvedTitle, headerName, rID, rName, rIcon, catGroup, 2, logLine, numItems or 1, isMapQuest)
+            RegisterReward(questID, resolvedTitle, headerName, rID, rName, rIcon, catGroup, 2, logLine, numItems or 1, isMapQuest, false)
         end
     end
 
@@ -525,7 +618,7 @@ local function ScanSingleQuestRewards(questID, qTitle, headerName, isMapQuest)
     if gold > 0 then
         local goldIcon = "Interface\\MoneyFrame\\UI-GoldIcon"
         local logLine = FormatQuestLogRewardLine(gold, goldIcon, "Gold", true, false)
-        RegisterReward(questID, resolvedTitle, headerName, "GOLD", "Gold", goldIcon, 5, 2, logLine, gold, isMapQuest)
+        RegisterReward(questID, resolvedTitle, headerName, "GOLD", "Gold", goldIcon, 5, 2, logLine, gold, isMapQuest, false)
     end
 end
 
@@ -1195,7 +1288,7 @@ local function UpdateAllButtonLabels()
     end
 end
 
--- Renders the flat override list in the Quest Log with vertically stacked [Quantity] [Icon] [Currency Name] lines
+-- Renders the flat override list in the Quest Log with aligned [Quantity] [Icon] [Currency Name] sub-rows
 local function RenderCustomFilteredList()
     if not QuestScrollFrame or not QuestScrollFrame.qrfCustomList then return end
     local listFrame = QuestScrollFrame.qrfCustomList
@@ -1228,20 +1321,21 @@ local function RenderCustomFilteredList()
         local qData = matchingQuestsList[dataIndex]
 
         if qData and yCursor > listBottomLimit then
-            local badgeParts = {}
+            local matchedRewardIDs = {}
             for _, rID in ipairs(qData.order) do
                 if selectedFilters[rID] then
-                    table.insert(badgeParts, qData.badges[rID])
+                    table.insert(matchedRewardIDs, rID)
                 end
             end
 
             local watchedIcon = IsQuestWatched(qData.questID) and "|TInterface\\RaidFrame\\ReadyCheck-Ready:13:13:0:0|t " or ""
             row.titleText:SetText(watchedIcon .. "|cFFFFFFFF" .. qData.title .. "|r")
             row.zoneText:SetText("|cFF888888" .. qData.header .. "|r")
-            row.badgeText:SetText(table.concat(badgeParts, "\n"))
+            if row.badgeText then row.badgeText:SetText("") end
 
-            local textH = row.badgeText:GetStringHeight() or 14
-            local dynamicHeight = math.max(44, 32 + textH + 6)
+            local rewardsHeight = LayoutAlignedRewardLines(row, qData, matchedRewardIDs, 33, 6)
+            local dynamicHeight = math.max(44, 33 + rewardsHeight + 5)
+
             row:SetHeight(dynamicHeight)
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", listFrame, "TOPLEFT", 8, yCursor)
@@ -1291,19 +1385,13 @@ local function GetOrCreateQuestLogRewardRow(index, parentContents)
         row.topPadding = 2
         row.bottomPadding = 4
 
-        row.text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        row.text:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
-        row.text:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-        row.text:SetJustifyH("LEFT")
-        row.text:SetSpacing(2)
-
         questLogRewardRowPool[index] = row
     end
     row:SetParent(parentContents)
     return row
 end
 
--- Master UI update (Injects vertically stacked reward rows below each quest's objectives in QuestScrollFrame.Contents)
+-- Master UI update (Injects aligned [Quantity] [Icon] [Currency Name] rows below each quest's objectives)
 local function UpdateQuestLogUI()
     ScanQuestLogRewards()
     UpdateAllButtonLabels()
@@ -1366,14 +1454,14 @@ local function UpdateQuestLogUI()
                     local bLayoutIdx = button.layoutIndex
 
                     if CONFIG.showDefaultLogBadges and questID and type(bLayoutIdx) == "number" and not (button.info and button.info.isHeader) and qData then
-                        local badgeParts = {}
+                        local displayRewardIDs = {}
                         for _, rID in ipairs(qData.order) do
-                            if #badgeParts < 4 and (rID ~= "GOLD" or #qData.order == 1) then
-                                table.insert(badgeParts, qData.badges[rID])
+                            if #displayRewardIDs < 4 and (rID ~= "GOLD" or #qData.order == 1) then
+                                table.insert(displayRewardIDs, rID)
                             end
                         end
 
-                        if #badgeParts > 0 then
+                        if #displayRewardIDs > 0 then
                             local nextMajorIdx = math.huge
                             for _, majorIdx in ipairs(nonObjectiveIndices) do
                                 if majorIdx > bLayoutIdx then
@@ -1394,10 +1482,9 @@ local function UpdateQuestLogUI()
                             rowPoolIdx = rowPoolIdx + 1
                             local rewardRow = GetOrCreateQuestLogRewardRow(rowPoolIdx, contents)
                             rewardRow.layoutIndex = lastQuestElementIdx + 0.5
-                            rewardRow.text:SetText(table.concat(badgeParts, "\n"))
 
-                            local textH = rewardRow.text:GetStringHeight() or (#badgeParts * 15)
-                            rewardRow:SetHeight(math.max(14, textH + 2))
+                            local totalH = LayoutAlignedRewardLines(rewardRow, qData, displayRewardIDs, 0, 0)
+                            rewardRow:SetHeight(math.max(16, totalH))
                             rewardRow:Show()
                         end
                     end
@@ -2079,13 +2166,6 @@ local function CreateQuestLogUI()
         row.zoneText:SetPoint("RIGHT", row, "RIGHT", -6, 0)
         row.zoneText:SetJustifyH("LEFT")
         row.zoneText:SetWordWrap(false)
-
-        -- Line 3+ (Vertically stacked below description): [Quantity] [Icon] [Currency Name]
-        row.badgeText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        row.badgeText:SetPoint("TOPLEFT", row.zoneText, "BOTTOMLEFT", 0, -3)
-        row.badgeText:SetPoint("RIGHT", row, "RIGHT", -6, 0)
-        row.badgeText:SetJustifyH("LEFT")
-        row.badgeText:SetSpacing(2)
 
         customListRowPool[i] = row
     end

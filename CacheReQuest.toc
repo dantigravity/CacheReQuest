@@ -2,7 +2,7 @@
 ## Title: Cache ReQuest
 ## Notes: Dynamically filter your Quest Log and Objective Tracker by available currencies, seasonal tokens, items, and gold.
 ## Author: Dantigravity
-## Version: 1.1.1
+## Version: 1.2.0
 ## IconTexture: Interface\MoneyFrame\UI-GoldIcon
 ## Category-enUS: Quests
 ## SavedVariablesPerCharacter: QRF_SavedState

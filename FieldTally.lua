@@ -8,7 +8,8 @@
 -- Saved data:
 --   QRF_SavedState.fieldTally  (per character)  the tally's settings, position and size
 --   CRQ_TallyKnowledge         (account-wide)   where items were looted and which mobs dropped them
--- Everything is drawn with colour textures, gradients, lines and vertex offsets: no art files.
+-- The handkerchief, parchment and transparent looks are drawn with colour textures, gradients,
+-- lines and vertex offsets. Crumpled paper and torn rag use the two images in textures\.
 -- ============================================================================
 local ADDON_NAME, ns = ...
 ns = (type(ns) == "table") and ns or {}
@@ -54,7 +55,7 @@ ns.Tally = T
 
 T.DEFAULTS = {
     show = true,                    -- the Field Tally is shown
-    look = "HANDKERCHIEF",          -- "HANDKERCHIEF", "PARCHMENT" or "NATIVE" (transparent window)
+    look = "RAG",                   -- "RAG" (torn rag), "CRUMPLED", "HANDKERCHIEF", "PARCHMENT" or "NATIVE" (transparent window)
     font = "QUILL",                 -- handwriting: "QUILL", "SCRAWL" or "PLAIN"
     nearRadius = 10,                -- "Near me": how close (% of the zone map) the items must be
     pageRadius = 16,                -- distance grouping: page size (% of the zone map)
@@ -476,6 +477,17 @@ function P.LayoutSheet(sheet, w, h, angle, dx, dy)
     end
     if sheet.hem then P.LayoutCloth(sheet, hw, hh) end
 
+    -- Texture looks (torn rag, crumpled paper): one quad with the image, rotated with the sheet.
+    -- The image's alpha is the shape, so no edges are drawn on top.
+    if o.image then
+        P.HideClothShape(sheet)
+        for layer = 1, 2 do
+            for _, tex in ipairs(sheet.segs[layer]) do tex:Hide() end
+        end
+        PQ(sheet, sheet.body, -hw, -hh, hw, hh)
+        return
+    end
+
     -- Cloth (handkerchief): rounded corners and a scalloped lace edge instead of torn paper
     if o.cloth then
         P.LayoutClothShape(sheet, hw, hh, o.cloth)
@@ -689,7 +701,21 @@ function P.RestyleSheet(sheet, opts)
     sheet.opts = opts
     sheet.layoutKey = nil
     local pc = opts.paper
-    sheet.body:SetColorTexture(pc[1], pc[2], pc[3], pc[4])
+    if opts.image then
+        -- texture looks: the image carries its own shape; paper = its tint. flip 1/2/3 turns a page
+        -- underneath horizontally / vertically / both, so the pile doesn't repeat the top sheet.
+        sheet.body:SetTexture(opts.image)
+        local fl = opts.flip or 0
+        local l, r, t, b = 0, 1, 0, 1
+        if fl == 1 or fl == 3 then l, r = 1, 0 end
+        if fl == 2 or fl == 3 then t, b = 1, 0 end
+        sheet.body:SetTexCoord(l, r, t, b)
+        sheet.body:SetVertexColor(pc[1], pc[2], pc[3], pc[4])
+    else
+        sheet.body:SetColorTexture(pc[1], pc[2], pc[3], pc[4])
+        sheet.body:SetTexCoord(0, 1, 0, 1)
+        sheet.body:SetVertexColor(1, 1, 1, 1)
+    end
     for layer = 1, 2 do
         local col = (layer == 1) and opts.rim or opts.paper
         for _, tex in ipairs(sheet.segs[layer]) do
@@ -917,8 +943,11 @@ function P.SetInkFont(fs, kind, flags)
 end
 
 -- ----------------------------------------------------------------------------
--- LOOKS: handkerchief notes (default), the parchment pile, or a see-through WoW window
--- Every colour the tally draws with comes from here.
+-- LOOKS: handkerchief notes, the parchment pile, crumpled paper, a torn rag (default), or a
+-- see-through WoW window. Every colour the tally draws with comes from here.
+-- Crumpled paper and torn rag are images in textures\ (512x512, 32-bit uncompressed TGA; the
+-- alpha channel is the shape). image = the file, imageCorner = where its bottom-right corner sits
+-- (fraction of width, height) so the page-turn corner folds the material there.
 -- EDIT: colours are { red, green, blue, opacity } from 0 to 1. Per look:
 --   paper = the sheet, back = the pages underneath, ink / inkRed / inkGreen = writing, counts and
 --   "(turn in)", title / footer / faded = heading, footer and ticked-off items, hem = the
@@ -927,6 +956,8 @@ end
 --   (gold for money). To make a different look the default, change T.DEFAULTS.look near the top
 --   of the file to that look's key.
 -- ----------------------------------------------------------------------------
+P.TEXTURE_DIR = "Interface\\AddOns\\" .. (ADDON_NAME or "CacheReQuest") .. "\\textures\\"
+
 P.STYLES = {
     {
         key = "HANDKERCHIEF", label = "Handkerchief notes",
@@ -977,6 +1008,47 @@ P.STYLES = {
                    shadow = { 0.10, 0.05, 0.01 } },
     },
     {
+        -- a sheet crumpled into a ball and flattened out again (textures\crumpled_paper.tga), in pencil
+        key = "CRUMPLED", label = "Crumpled paper",
+        image = P.TEXTURE_DIR .. "crumpled_paper",
+        paper = { 1, 1, 1, 1 }, depth = 1,
+        back = { { 0.93, 0.93, 0.92, 1 }, { 0.88, 0.88, 0.87, 1 }, { 0.83, 0.83, 0.82, 1 } },
+        -- where the paper's bottom-right corner is in the image (fraction of width, of height):
+        -- the folded page-turn corner is placed exactly there
+        imageCorner = { 0.036, 0.034 },
+        shadowAlpha = 0.35, pile = true,
+        ink = { 0.20, 0.20, 0.22 }, inkRed = { 0.62, 0.16, 0.12 }, inkGreen = { 0.18, 0.42, 0.22 },
+        title = { 0.20, 0.20, 0.22 }, faded = { 0.50, 0.50, 0.50 }, footer = { 0.38, 0.38, 0.40 },
+        sub = { 0.45, 0.45, 0.48 }, close = { 0.35, 0.35, 0.38 }, gear = { 0.35, 0.35, 0.38 },
+        reward = { 0.18, 0.30, 0.42 }, rewardGold = { 0.55, 0.38, 0.04 },
+        wash = { 0.30, 0.30, 0.30, 0.05 }, washFlash = { 0.95, 0.72, 0.20, 0.45 },
+        divider = { 0.35, 0.35, 0.40, 0.12 }, highlight = { 0.30, 0.30, 0.30, 0.08 },
+        grip = { 0.45, 0.45, 0.48, 0.85 }, pad = 8,
+        corner = { u1 = { 0.55, 0.55, 0.53 }, u2 = { 0.86, 0.85, 0.82 }, tip = { 0.98, 0.97, 0.94 },
+                   crease = { 0.78, 0.77, 0.74 }, edge = { 0.45, 0.45, 0.45, 0.70 }, cut = { 0.55, 0.55, 0.55, 0.70 },
+                   shadow = { 0.10, 0.10, 0.10 } },
+    },
+    {
+        -- cream cotton torn off a shirt: torn edges, loose threads, a folded hem along the bottom
+        -- (textures\torn_rag.tga), written on in soot
+        key = "RAG", label = "Torn rag",
+        image = P.TEXTURE_DIR .. "torn_rag",
+        paper = { 1, 1, 1, 1 }, depth = 1,
+        back = { { 0.92, 0.90, 0.86, 1 }, { 0.86, 0.83, 0.78, 1 }, { 0.80, 0.77, 0.71, 1 } },
+        imageCorner = { 0.068, 0.046 },        -- the cloth's bottom-right corner (see Crumpled paper)
+        shadowAlpha = 0.32, pile = true,
+        ink = { 0.15, 0.12, 0.10 }, inkRed = { 0.55, 0.20, 0.10 }, inkGreen = { 0.25, 0.38, 0.18 },
+        title = { 0.15, 0.12, 0.10 }, faded = { 0.48, 0.43, 0.36 }, footer = { 0.40, 0.34, 0.26 },
+        sub = { 0.50, 0.42, 0.32 }, close = { 0.35, 0.28, 0.20 }, gear = { 0.35, 0.28, 0.20 },
+        reward = { 0.20, 0.30, 0.36 }, rewardGold = { 0.52, 0.34, 0.06 },
+        wash = { 0.45, 0.38, 0.25, 0.06 }, washFlash = { 0.95, 0.72, 0.20, 0.45 },
+        divider = { 0.45, 0.38, 0.25, 0.12 }, highlight = { 0.45, 0.35, 0.15, 0.08 },
+        grip = { 0.55, 0.48, 0.36, 0.85 }, pad = 20,           -- writing kept well clear of the torn edges
+        corner = { u1 = { 0.50, 0.46, 0.38 }, u2 = { 0.84, 0.80, 0.70 }, tip = { 0.93, 0.90, 0.81 },
+                   crease = { 0.74, 0.70, 0.60 }, edge = { 0.45, 0.40, 0.30, 0.70 }, cut = { 0.55, 0.50, 0.40, 0.60 },
+                   shadow = { 0.10, 0.08, 0.05 } },
+    },
+    {
         key = "NATIVE", label = "Transparent window",
         paper = { 0.02, 0.02, 0.03, 0.70 }, rim = { 0.55, 0.55, 0.60, 0.85 },
         depth = 1, minDepth = 1, segW = 40,                              -- straight edges, 1px border
@@ -1017,6 +1089,29 @@ function P.Hex(c)
     return string.format("FF%02X%02X%02X", math.floor(c[1] * 255 + 0.5), math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5))
 end
 
+-- Puts the page-turn corner on the sheet's real corner: just past the frame for paper, inside the
+-- rounded corner for cloth (cornerInset), and on the image's own corner for texture looks
+-- (imageCorner, so it follows the window size)
+function P.PlaceCorner(f)
+    local c = f and f.corner
+    if not c then return end
+    local st = P.GetStyle()
+    local offX, offY
+    if st.imageCorner then
+        local w, h = f:GetWidth() or 230, f:GetHeight() or 175
+        offX = -math.floor(w * st.imageCorner[1] + 0.5)
+        offY = math.floor(h * st.imageCorner[2] + 0.5)
+    else
+        local ci = st.cornerInset or 0
+        offX, offY = 3 - ci, -3 + ci
+    end
+    if c.offX == offX and c.offY == offY and c:GetPoint(1) then return end
+    c.offX, c.offY = offX, offY
+    c:ClearAllPoints()
+    c:SetPoint("BOTTOMRIGHT", f.chrome, "BOTTOMRIGHT", offX, offY)
+    c.drawnKey = nil
+end
+
 -- Repaints the whole pile and its chrome for the current look
 function P.ApplyStyle(f)
     f = f or T.frame
@@ -1026,25 +1121,22 @@ function P.ApplyStyle(f)
     f.styleKey = st.key
 
     local cl = st.cloth
+    -- image looks: the texture's own shape casts the shadow (tinted black) and makes the pile underneath
     P.RestyleSheet(f.shadowSheet, { paper = { 0, 0, 0, st.shadowAlpha or 0 }, depth = st.depth + 0.5, minDepth = 1, segW = 14, overlap = 0,
-        cloth = cl and { radius = cl.radius + 1 } or nil })      -- a soft rounded shadow, no lace
+        cloth = cl and { radius = cl.radius + 1 } or nil, image = st.image })      -- a soft rounded shadow, no lace
     for k, sh in ipairs(f.backSheets) do
         local bp = st.back[k]
         P.RestyleSheet(sh, { paper = bp, rim = st.backRim, depth = st.backDepth, minDepth = st.backMinDepth, segW = st.backSegW,
             cloth = cl and { radius = cl.radius, scallop = cl.scallop, step = cl.step, ripple = cl.ripple,
                 lace = { math.min(1, bp[1] * 1.03), math.min(1, bp[2] * 1.03), math.min(1, bp[3] * 1.03), bp[4] },
-                thread = st.backThread } or nil })
+                thread = st.backThread } or nil,
+            image = st.image, flip = k })            -- each page underneath turned a different way
     end
     P.RestyleSheet(f.topSheet, {
         paper = st.paper, rim = st.rim, depth = st.depth, minDepth = st.minDepth, segW = st.segW,
-        grain = st.grain, shade = st.shade, hem = st.hem, cloth = cl,
+        grain = st.grain, shade = st.shade, hem = st.hem, cloth = cl, image = st.image,
     })
-    if f.corner then
-        -- on cloth the folded corner sits inside the rounded corner instead of poking past it
-        local ci = st.cornerInset or 0
-        f.corner:ClearAllPoints()
-        f.corner:SetPoint("BOTTOMRIGHT", f.chrome, "BOTTOMRIGHT", 3 - ci, -3 + ci)
-    end
+    P.PlaceCorner(f)
     f.shadowSheet:SetShown((st.shadowAlpha or 0) > 0)
 
     local cc = st.close
@@ -1160,7 +1252,7 @@ end
 
 -- ----------------------------------------------------------------------------
 -- DOG-EARED PAGE CORNER (hot corner that turns to the next area's page)
--- Built from 1px scanline strips so it needs no art files or vertex offsets:
+-- Built from 1px scanline strips (for the texture looks, strips of the image itself):
 --   * the folded-over flap (upper-left triangle, paper underside, shaded toward the fold)
 --   * the gap the fold leaves (lower-right triangle), showing the page underneath
 -- Hovering lifts the corner further.
@@ -1178,9 +1270,21 @@ function P.HGradient(tex, r1, g1, b1, a1, r2, g2, b2, a2)
     end
 end
 
+-- Vertex-colour gradient over whatever the texture already shows (texture looks keep their image)
+function P.TexGradient(tex, r1, g1, b1, a1, r2, g2, b2, a2)
+    if tex.SetGradient and CreateColor then
+        tex:SetGradient("HORIZONTAL", CreateColor(r1, g1, b1, a1), CreateColor(r2, g2, b2, a2))
+    else
+        tex:SetVertexColor((r1 + r2) * 0.5, (g1 + g2) * 0.5, (b1 + b2) * 0.5, (a1 + a2) * 0.5)
+    end
+end
+
 function P.DrawCorner(c)
     local S = math.max(2, math.min(P.CORNER_MAX, c.size or P.CORNER_REST))
-    local key = math.floor(S * 4 + 0.5)
+    local st = P.GetStyle()
+    local parent = c:GetParent()
+    local pw, ph = (parent and parent:GetWidth()) or 0, (parent and parent:GetHeight()) or 0
+    local key = math.floor(S * 4 + 0.5) .. ":" .. st.key .. ":" .. math.floor(pw) .. ":" .. math.floor(ph)
     if c.drawnKey == key then return end
     c.drawnKey = key
 
@@ -1188,9 +1292,22 @@ function P.DrawCorner(c)
     local lift = (S - P.CORNER_REST) / (P.CORNER_HOVER - P.CORNER_REST)   -- 0 at rest, 1 fully lifted
     if lift < 0 then lift = 0 elseif lift > 1 then lift = 1 end
     local n = math.floor(S + 0.5)
-    local cs = P.GetStyle().corner
+    local cs = st.corner
     local u1, u2, tip, cr = cs.u1, cs.u2, cs.tip, cs.crease
     local tipK = 1 - 0.06 * lift
+
+    -- Texture looks: the fold shows the material itself. Square-local point (a, b) (a right, b down
+    -- from the active square's top-left) -> texture coords of the sheet underneath the button.
+    local img = st.image and pw > 0 and ph > 0
+    local TX, TY
+    if img then
+        local offX, offY = c.offX or 3, c.offY or -3     -- where P.PlaceCorner anchored the button
+        local sx = pw + offX - P.CORNER_MAX + ox        -- square's left edge, from the sheet's left
+        local sy = ph - offY - P.CORNER_MAX + ox        -- square's top edge, from the sheet's top
+        TX = function(a) return (sx + a) / pw end
+        TY = function(b) return (sy + b) / ph end
+    end
+
     for j = 1, P.CORNER_MAX do
         local under, flap = c.under[j], c.flap[j]
         if j <= n then
@@ -1198,20 +1315,45 @@ function P.DrawCorner(c)
             local cut = S - (j - 0.5)              -- where the fold line crosses this row
             if cut < 0 then cut = 0 end
             local uw = S - cut
+            local vTop, vBot = j - 1, j
             under:ClearAllPoints()
             under:SetPoint("TOPLEFT", c, "TOPLEFT", ox + cut, y)
             under:SetSize(math.max(0.5, uw), 1)
-            -- the page beneath, darkened right under the fold where the flap shades it
-            P.HGradient(under, u1[1], u1[2], u1[3], 1, u2[1], u2[2], u2[3], 1)
+            if img then
+                -- the page beneath: the same material, in the shadow of the lifted flap
+                under:SetTexture(st.image)
+                under:SetTexCoord(TX(cut), TX(S), TY(vTop), TY(vBot))
+                local d = 0.62 - 0.08 * lift
+                P.TexGradient(under, d, d, d, 1, 0.86, 0.86, 0.86, 1)
+            else
+                -- the page beneath, darkened right under the fold where the flap shades it
+                under:SetTexCoord(0, 1, 0, 1)
+                P.HGradient(under, u1[1], u1[2], u1[3], 1, u2[1], u2[2], u2[3], 1)
+            end
             under:Show()
 
             if cut > 0.4 then
                 flap:ClearAllPoints()
                 flap:SetPoint("TOPLEFT", c, "TOPLEFT", ox, y)
                 flap:SetSize(cut, 1)
-                -- underside of the parchment: lighter at the tip, shading into the crease
-                P.HGradient(flap, tip[1] * tipK, tip[2] * tipK, tip[3] * tipK, 1,
-                    cr[1] - 0.08 * lift, cr[2] - 0.08 * lift, cr[3] - 0.06 * lift, 1)
+                if img then
+                    -- the corner folded over: what was at (S - v, S - u) now lies at (u, v), i.e. the
+                    -- corner mirrored across the fold line (8-value SetTexCoord: UL, LL, UR, LR)
+                    flap:SetTexture(st.image)
+                    flap:SetTexCoord(
+                        TX(S - vTop), TY(S),            -- top-left     <- (u = 0,   v = top)
+                        TX(S - vBot), TY(S),            -- bottom-left  <- (u = 0,   v = bottom)
+                        TX(S - vTop), TY(S - cut),      -- top-right    <- (u = cut, v = top)
+                        TX(S - vBot), TY(S - cut))      -- bottom-right <- (u = cut, v = bottom)
+                    -- the back of the material catches the light at the tip and shades into the crease
+                    local t, k = 1.04 - 0.05 * lift, 0.80 - 0.07 * lift
+                    P.TexGradient(flap, t, t, t * 0.98, 1, k, k, k * 0.97, 1)
+                else
+                    flap:SetTexCoord(0, 1, 0, 1)
+                    -- underside of the parchment: lighter at the tip, shading into the crease
+                    P.HGradient(flap, tip[1] * tipK, tip[2] * tipK, tip[3] * tipK, 1,
+                        cr[1] - 0.08 * lift, cr[2] - 0.08 * lift, cr[3] - 0.06 * lift, 1)
+                end
                 flap:Show()
             else
                 flap:Hide()
@@ -1221,6 +1363,9 @@ function P.DrawCorner(c)
             flap:Hide()
         end
     end
+    -- texture looks: the material's own edge shows, so no drawn straight edges on the flap
+    c.flapTop:SetShown(not img)
+    c.flapLeft:SetShown(not img)
 
     -- crease, cast shadow and the flap's cut edges
     c.foldShadow:SetStartPoint("TOPLEFT", c, ox + S + 1.2, -ox - 1.2)
@@ -1288,7 +1433,10 @@ function P.UpdateCorner(f)
     if not f.corner then return end
     local multi = #P.areas > 1
     f.corner:SetShown(multi)
-    if multi then P.DrawCorner(f.corner) end
+    if multi then
+        P.PlaceCorner(f)          -- texture looks: follows the image's corner as the window is resized
+        P.DrawCorner(f.corner)
+    end
 end
 
 -- ----------------------------------------------------------------------------
@@ -1977,6 +2125,11 @@ local function EnsureShoppingListFrame()
 
     f:SetScript("OnSizeChanged", function(self)
         P.ApplyStackLayout(self)
+        -- texture looks: the corner sits on the image's own corner, which moves as the window resizes
+        if self.corner and self.corner:IsShown() then
+            P.PlaceCorner(self)
+            P.DrawCorner(self.corner)
+        end
     end)
     f:SetScript("OnHide", function(self)
         if T.HideMapPreview then T.HideMapPreview() end
@@ -3862,7 +4015,7 @@ function T.BuildOptionsPanel()
         P.CycleStyle(); T.Save(); P.ApplyStyle(); Redraw()
     end, function(self) self:SetText("Look: " .. P.GetStyle().label) end)
     Tip(lookBtn, "Look of the Field Tally",
-        "Handkerchief notes: written on a lace-edged handkerchief.\nParchment: a pile of torn parchment pages.\nTransparent window: a see-through panel in the standard font.")
+        "Handkerchief notes: written on a lace-edged handkerchief.\nParchment: a pile of torn parchment pages.\nCrumpled paper: a sheet crumpled up and flattened out again, in pencil.\nTorn rag: a strip of cotton torn off a shirt, in soot.\nTransparent window: a see-through panel in the standard font.")
     local fontBtn = Button("Handwriting: Quill script", 200, 244, function()
         P.CycleFontStyle(); T.Save(); Redraw()
     end, function(self)
@@ -3948,7 +4101,7 @@ function T.BuildOptionsPanel()
     hint:SetPoint("TOPLEFT", p, "TOPLEFT", 20, y)
     hint:SetPoint("RIGHT", p, "RIGHT", -24, 0)
     hint:SetJustifyH("LEFT")
-    hint:SetText("Slash: /crq (options), /crq tally, /crq look [handkerchief|parchment|window], /crq reset, /crq debug")
+    hint:SetText("Slash: /crq (options), /crq tally, /crq look [handkerchief|parchment|crumpled|rag|window], /crq reset, /crq debug")
 
     p:SetScript("OnShow", function() T.RefreshOptionsPanel() end)
     T.optionsPanel = p
@@ -4095,6 +4248,7 @@ SlashCmdList["CACHEREQUEST"] = function(msg)
     elseif cmd == "look" or cmd == "style" or string.find(cmd, "^look ") or string.find(cmd, "^style ") then
         local want = string.match(cmd, "^%a+%s+(%a+)")
         local alias = { handkerchief = "HANDKERCHIEF", hanky = "HANDKERCHIEF", parchment = "PARCHMENT",
+            crumpled = "CRUMPLED", paper = "CRUMPLED", rag = "RAG", torn = "RAG",
             window = "NATIVE", transparent = "NATIVE", native = "NATIVE" }
         if want and alias[want] then T.db.look = alias[want] else P.CycleStyle() end
         T.Save()

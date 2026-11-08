@@ -71,6 +71,11 @@ function methods:CreateMaskTexture(name) return NewRegion("MaskTexture", self, n
 function methods:CreateFontString(name) return NewRegion("FontString", self, name) end
 function methods:CreateLine(name) return NewRegion("Line", self, name) end
 function methods:GetTexture() return "tex" end
+-- texture state is recorded so tests can check images, flips and tints
+function methods:SetTexture(t) self.__tex = t end
+function methods:SetColorTexture(r, g, b, a) self.__tex = "color"; self.__color = { r, g, b, a } end
+function methods:SetTexCoord(...) self.__tc = { ... } end
+function methods:SetVertexColor(r, g, b, a) self.__vc = { r, g, b, a } end
 function methods:GetOwner() return nil end
 methods.StartMoving = noop
 methods.StopMovingOrSizing = noop

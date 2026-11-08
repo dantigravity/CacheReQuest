@@ -521,8 +521,10 @@ check(not P.mmPins[1].__shown, "no pins without a super-tracked quest")
 PX, PY = 0.55, 0.60
 
 -- 13) Looks and handwriting
-check(T.db.look == "HANDKERCHIEF" and P.GetStyle().label == "Handkerchief notes", "handkerchief notes is the default look")
+check(T.DEFAULTS.look == "RAG" and T.db.look == "RAG" and P.GetStyle().label == "Torn rag", "torn rag is the default look")
+check(f.topSheet.body.__tex == P.TEXTURE_DIR .. "torn_rag", "a new character's tally starts on the torn rag")
 local function CountShown(list) local n = 0; for _, t in ipairs(list or {}) do if t.__shown then n = n + 1 end end; return n end
+SlashCmdList["CACHEREQUEST"]("look handkerchief"); Refresh("ZONE_CHANGED")
 local cp = f.topSheet.clothParts
 check(cp and CountShown(cp.corner) == 4 and CountShown(cp.lace) > 60 and CountShown(cp.eye) == CountShown(cp.lace),
     "handkerchief: rounded corners, scalloped lace with eyelets")
@@ -532,16 +534,97 @@ check(CountShown(f.topSheet.segs[2]) == 0, "handkerchief: no torn paper edges")
 P.CycleStyle(); P.ApplyStyle(); Refresh("ZONE_CHANGED")
 check(T.db.look == "PARCHMENT" and f.topSheet.grain.__shown and CountShown(f.topSheet.segs[2]) > 20, "parchment: torn edges and grain")
 check(P.INK[1] == 0.17, "parchment: iron-gall ink from its style table")
+
+-- Texture looks: crumpled paper and torn rag
+local root2 = root
+local function FileExists(p) local fh = io.open(p, "rb"); if fh then fh:close(); return true end return false end
+local function TgaHeader(p)
+    local fh = io.open(p, "rb"); if not fh then return nil end
+    local h = fh:read(18); local size = fh:seek("end"); fh:close()
+    return { type = h:byte(3), w = h:byte(13) + 256 * h:byte(14), h = h:byte(15) + 256 * h:byte(16), bpp = h:byte(17), size = size }
+end
+for _, name in ipairs({ "crumpled_paper", "torn_rag" }) do
+    local hd = TgaHeader(root2 .. "/textures/" .. name .. ".tga")
+    check(hd and hd.type == 2 and hd.w == 512 and hd.h == 512 and hd.bpp == 32 and hd.size == 18 + 512 * 512 * 4,
+        "textures/" .. name .. ".tga is a 512x512 32-bit uncompressed TGA")
+end
+local function CheckImageLook(key, file, pad, shadowA, inkR, corner)
+    SlashCmdList["CACHEREQUEST"]("look " .. ((key == "RAG") and "rag" or "crumpled"))
+    Refresh("ZONE_CHANGED")
+    local st = P.GetStyle()
+    local path = "Interface\\AddOns\\CacheReQuest\\textures\\" .. file
+    check(T.db.look == key and st.image == path, key .. ": image path uses this addon's folder (" .. tostring(st.image) .. ")")
+    check(f.topSheet.body.__tex == path and f.topSheet.body.__vc and f.topSheet.body.__vc[1] == 1, key .. ": top sheet is the image, untinted")
+    check(CountShown(f.topSheet.segs[2]) == 0 and CountShown(f.topSheet.clothParts and f.topSheet.clothParts.lace) == 0 and not f.topSheet.hem[1].__shown
+        and not f.topSheet.grain.__shown, key .. ": no drawn edges, lace, hem or grain on top")
+    local sb = f.shadowSheet.body
+    check(f.shadowSheet.__shown and sb.__tex == path and sb.__vc[1] == 0 and sb.__vc[4] == shadowA, key .. ": shadow is the same image tinted black at " .. shadowA)
+    local _, _, _, sdx, sdy = f.shadowSheet:GetPoint(1)
+    check(sdx == 3 and sdy == -4, key .. ": shadow offset 3px right, 4px down")
+    local flips, distinct = {}, true
+    for k = 1, 3 do
+        local b = f.backSheets[k].body
+        local key2 = table.concat(b.__tc or {}, ",")
+        if flips[key2] or key2 == "0,1,0,1" then distinct = false end
+        flips[key2] = true
+        if b.__tex ~= path or not (b.__vc[1] < 1) then distinct = false end
+    end
+    check(distinct, key .. ": pages underneath are the same image, each flipped differently and darker")
+    check(f.visibleBackSheets == math.min(#P.areas - 1, 3), key .. ": pages peek out underneath")
+    local _, _, _, cx, cy = f.content:GetPoint(1)
+    check(f.pad == pad and cx == 6 + pad and cy == -28 - pad, key .. ": writing kept " .. pad .. "px inside the material")
+    check(math.abs(P.INK[1] - inkR) < 1e-9, key .. ": ink colour from its style table")
+    local cpt, crel, crp, ccx, ccy = f.corner:GetPoint(1)
+    check(cpt == "BOTTOMRIGHT" and crel == f.chrome and ccx == -math.floor(f:GetWidth() * corner[1] + 0.5)
+        and ccy == math.floor(f:GetHeight() * corner[2] + 0.5), key .. ": page corner on the image's own corner (" .. tostring(ccx) .. "," .. tostring(ccy) .. ")")
+    f.corner.drawnKey = nil; P.DrawCorner(f.corner)
+    local flapImg, flap8, underImg = false, false, false
+    for j = 1, P.CORNER_MAX do
+        local fl, un = f.corner.flap[j], f.corner.under[j]
+        if fl.__shown and fl.__tex == path then flapImg = true; if fl.__tc and #fl.__tc == 8 then flap8 = true end end
+        if un.__shown and un.__tex == path then underImg = true end
+    end
+    check(flapImg and flap8 and underImg, key .. ": the corner folds the material itself (mirrored flap, page beneath)")
+    check(not f.corner.flapTop.__shown and not f.corner.flapLeft.__shown, key .. ": no drawn straight edges on the flap")
+    f.corner:Show()                    -- the corner only shows with several pages; force it for the resize check
+    f:SetSize(300, 200)
+    local _, _, _, rcx, rcy = f.corner:GetPoint(1)
+    check(rcx == -math.floor(300 * corner[1] + 0.5) and rcy == math.floor(200 * corner[2] + 0.5), key .. ": corner follows the image when resized")
+    f:SetSize(T.db.frame.width, T.db.frame.height)
+end
+CheckImageLook("CRUMPLED", "crumpled_paper", 8, 0.35, 0.20, { 0.036, 0.034 })
+CheckImageLook("RAG", "torn_rag", 20, 0.32, 0.15, { 0.068, 0.046 })
 P.CycleStyle(); P.ApplyStyle(); Refresh("ZONE_CHANGED")
 check(T.db.look == "NATIVE" and f.visibleBackSheets == 0 and not f.shadowSheet.__shown, "transparent window: no page pile")
 check(f.titleFS.inkKey:find("^PLAIN:"), "transparent window uses the standard font")
+check(f.topSheet.body.__tex == "color" and f.topSheet.body.__tc and table.concat(f.topSheet.body.__tc, ",") == "0,1,0,1",
+    "switching away from an image look restores the plain sheet")
+local cpt2, _, _, ncx, ncy = f.corner:GetPoint(1)
+check(ncx == 3 and ncy == -3, "the page corner goes back to the frame's corner")
+local styleKeys = {}
+for _, s in ipairs(P.STYLES) do styleKeys[#styleKeys + 1] = s.key end
+check(table.concat(styleKeys, ",") == "HANDKERCHIEF,PARCHMENT,CRUMPLED,RAG,NATIVE", "five looks, in cycle order")
 SlashCmdList["CACHEREQUEST"]("look handkerchief")
 check(T.db.look == "HANDKERCHIEF" and f.styleKey == "HANDKERCHIEF", "/crq look handkerchief")
 local fonts = {}
 for _ = 1, 3 do P.CycleFontStyle(); fonts[#fonts + 1] = T.db.font end
 check(table.concat(fonts, ",") == "SCRAWL,PLAIN,QUILL", "handwriting cycles quill > scrawl > plain")
 check(P.FONT_STYLES[1].path == "Fonts\\MORPHEUS.TTF" and P.FONT_STYLES[2].path == "Fonts\\SKURRI.TTF", "built-in client fonts only")
-check(not addonSrc:find("%.tga") and not addonSrc:find("%.blp") and not addonSrc:find("Interface\\\\AddOns"), "no art files")
+-- the source names one addon folder (P.TEXTURE_DIR), and every image look points at a file that exists
+local refs, s = 0, 1
+while true do
+    local a, b = addonSrc:find("Interface\\\\AddOns", s, true)
+    if not a then break end
+    refs, s = refs + 1, b + 1
+end
+local imagesExist = true
+for _, st in ipairs(P.STYLES) do
+    if st.image then
+        local rel = st.image:gsub("^Interface\\AddOns\\CacheReQuest\\", ""):gsub("\\", "/")
+        if not FileExists(root .. "/" .. rel .. ".tga") then imagesExist = false end
+    end
+end
+check(refs == 1 and imagesExist and not addonSrc:find("%.blp"), "the only art files are the two images in this addon's textures folder")
 
 -- 14) Default position above the chat tabs; recomputed after Edit Mode
 local pt, _, relPt, defX, defY = f:GetPoint(1)
@@ -569,7 +652,7 @@ check(NearIDs()[101], "with no reward filter, everything shows")
 QRF_SavedState.fieldTally = { look = "BOGUS", font = "PLAIN", nearRadius = 999, opts = { inkEffects = false, showTabs = "yes" },
     frame = { width = 5000 } }
 Fire("ADDON_LOADED", "CacheReQuest")
-check(T.db.look == "HANDKERCHIEF" and T.db.font == "PLAIN", "unknown look ignored, valid font kept")
+check(T.db.look == T.DEFAULTS.look and T.db.font == "PLAIN", "unknown look falls back to the default, valid font kept")
 check(T.db.nearRadius == 50 and T.db.opts.inkEffects == false and T.db.opts.showTabs == true, "out-of-range / wrong-type values fall back")
 check(T.db.frame.width == 520 and T.db.frame.height == 175 and T.db.opts.minimapPins == true, "missing settings get their defaults")
 check(QRF_SavedState.fieldTally == T.db, "loaded settings are what gets saved")

@@ -1,4 +1,12 @@
 -- ============================================================================
+-- CACHE REQUEST
+-- Filters the Quest Log, Objective Tracker and World Map by quest rewards (currencies, seasonal
+-- tokens, items, gold), and stacks nearby tracker quests into (?) turn-in and (•••) incomplete decks.
+-- Saved per character in QRF_SavedState. The Field Tally lives in FieldTally.lua and reads the
+-- helpers shared at the end of this file.
+-- ============================================================================
+
+-- ============================================================================
 -- ADDON CONFIGURATION (Edit display names and defaults here)
 -- ============================================================================
 local CONFIG = {
@@ -19,8 +27,10 @@ local CONFIG = {
 -- ============================================================================
 
 local CIRCLE_MASK_TEX = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
-local MAX_CARDS_PER_STACK = 8
+local MAX_CARDS_PER_STACK = 8       -- most quests shown in one tracker stack
 
+-- Settings. The true/false values below are the defaults a new character starts with; most can be
+-- switched in the footer of the filter menu.
 local selectedFilters = {}
 local collapsedCategories = {}
 local knownRewardMeta = {}
@@ -32,7 +42,7 @@ local filterMapPins = true
 local hideUnmatchedMapPins = false
 local legendCollapsed = false
 
--- Objective Tracker Quest Stacking state
+-- Objective Tracker quest stacking: (?) turn-in and (•••) incomplete stacks. Radius = % of the zone map (1-50).
 local showTrackerStackBar = true
 local turnInStackEnabled = true
 local turnInRadiusPercent = 16
@@ -68,9 +78,10 @@ local preloadRefreshPending = false
 local customScrollOffset = 0
 local dropdownScrollOffset = 0
 local dropdownSearchText = ""
+local menuPositions = {}            -- [ "TRACKER" | "QUESTLOG" ] = { x, y }: where the filter menu was dragged to
 
-local MAX_CUSTOM_ROWS = 8
-local MAX_DROPDOWN_ROWS = 15
+local MAX_CUSTOM_ROWS = 8           -- quests shown at once in the filtered Quest Log list
+local MAX_DROPDOWN_ROWS = 15        -- rows shown at once in the filter menu (the rest scroll)
 
 local sharedMenuFrame = nil
 local questLogBar = nil
@@ -151,6 +162,7 @@ local function SaveState()
     QRF_SavedState.incompleteStackEnabled = incompleteStackEnabled
     QRF_SavedState.incompleteRadiusPercent = incompleteRadiusPercent
     QRF_SavedState.cachedQuestCoords = cachedQuestCoords
+    QRF_SavedState.menuPositions = menuPositions
 end
 
 local function LoadState()
@@ -177,6 +189,15 @@ local function LoadState()
         end
         if type(QRF_SavedState.cachedQuestCoords) == "table" then
             cachedQuestCoords = QRF_SavedState.cachedQuestCoords
+        end
+        menuPositions = {}
+        if type(QRF_SavedState.menuPositions) == "table" then
+            for key, pos in pairs(QRF_SavedState.menuPositions) do
+                if (key == "TRACKER" or key == "QUESTLOG") and type(pos) == "table"
+                    and type(pos.x) == "number" and type(pos.y) == "number" then
+                    menuPositions[key] = { x = pos.x, y = pos.y }
+                end
+            end
         end
     end
 end
@@ -1868,12 +1889,16 @@ RebuildDropdownMenu = function(menuFrame, searchJustChanged)
     menuFrame.stackBarRow:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -8, footerY)
     menuFrame.stackBarRow.check:SetChecked(showTrackerStackBar)
 
-    -- Row 5: Auto-untrack others + Done button
+    -- Row 5: Auto-untrack others + Reset and Done buttons
     footerY = footerY - 20
     menuFrame.untrackRow:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 6, footerY)
-    menuFrame.untrackRow:SetPoint("RIGHT", menuFrame.doneBtn, "LEFT", -4, 0)
+    menuFrame.untrackRow:SetPoint("RIGHT", menuFrame.resetBtn or menuFrame.doneBtn, "LEFT", -4, 0)
     menuFrame.untrackRow.check:SetChecked(autoUntrack)
     menuFrame.doneBtn:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -8, footerY - 1)
+    if menuFrame.resetBtn then
+        -- greyed out while there's nothing to reset
+        menuFrame.resetBtn:SetEnabled(GetActiveFilterCount() > 0 or strtrim(dropdownSearchText or "") ~= "")
+    end
 
     local finalWidth = math.min(math.max(maxWidth, 270), 305)
     menuFrame:SetSize(finalWidth, math.abs(footerY) + 30)
@@ -1906,8 +1931,14 @@ local function ToggleMenuAtButton(anchorButton, alignRight)
     end
 
     sharedMenuFrame.anchorOwner = anchorButton
+    sharedMenuFrame.alignRight = alignRight
+    -- Each button remembers where you dragged its menu; otherwise it opens just under the button
+    sharedMenuFrame.positionKey = (anchorButton == trackerFilterBtn) and "TRACKER" or "QUESTLOG"
     sharedMenuFrame:ClearAllPoints()
-    if alignRight then
+    local saved = menuPositions[sharedMenuFrame.positionKey]
+    if saved then
+        sharedMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", saved.x, saved.y)
+    elseif alignRight then
         sharedMenuFrame:SetPoint("TOPRIGHT", anchorButton, "BOTTOMRIGHT", 0, -2)
     else
         sharedMenuFrame:SetPoint("TOPLEFT", anchorButton, "BOTTOMLEFT", 0, -2)
@@ -1933,6 +1964,61 @@ local function EnsureSharedMenu()
 
     menuFrame.measureLabel = menuFrame:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     menuFrame.measureLabel:Hide()
+
+    -- Movable: drag it by the header (or any empty spot); it reopens where you left it.
+    -- Right-click the header to put it back under its button.
+    menuFrame:SetMovable(true)
+    menuFrame:RegisterForDrag("LeftButton")
+    if menuFrame.SetDontSavePosition then menuFrame:SetDontSavePosition(true) end  -- position is kept in menuPositions
+    local function StartMenuDrag()
+        menuFrame:StartMoving()
+    end
+    local function StopMenuDrag()
+        menuFrame:StopMovingOrSizing()
+        local left, top = menuFrame:GetLeft(), menuFrame:GetTop()
+        if left and top and menuFrame.positionKey then
+            local k = (menuFrame:GetEffectiveScale() or 1) / (UIParent:GetEffectiveScale() or 1)
+            menuPositions[menuFrame.positionKey] = { x = math.floor(left * k + 0.5), y = math.floor(top * k + 0.5) }
+            menuFrame:ClearAllPoints()
+            menuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", menuPositions[menuFrame.positionKey].x, menuPositions[menuFrame.positionKey].y)
+            SaveState()
+        end
+    end
+    menuFrame:SetScript("OnDragStart", StartMenuDrag)
+    menuFrame:SetScript("OnDragStop", StopMenuDrag)
+
+    local dragHandle = CreateFrame("Frame", nil, menuFrame)
+    dragHandle:SetPoint("TOPLEFT", menuFrame, "TOPLEFT", 0, 0)
+    dragHandle:SetPoint("TOPRIGHT", menuFrame, "TOPRIGHT", -110, 0)   -- stops short of Group / close
+    dragHandle:SetHeight(24)
+    dragHandle:EnableMouse(true)
+    dragHandle:RegisterForDrag("LeftButton")
+    dragHandle:SetScript("OnDragStart", StartMenuDrag)
+    dragHandle:SetScript("OnDragStop", StopMenuDrag)
+    dragHandle:SetScript("OnMouseUp", function(_, button)
+        if button == "RightButton" and menuFrame.positionKey then
+            menuPositions[menuFrame.positionKey] = nil
+            SaveState()
+            local owner = menuFrame.anchorOwner
+            menuFrame:ClearAllPoints()
+            if owner and menuFrame.alignRight then
+                menuFrame:SetPoint("TOPRIGHT", owner, "BOTTOMRIGHT", 0, -2)
+            elseif owner then
+                menuFrame:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
+            else
+                menuFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+            end
+        end
+    end)
+    dragHandle:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine(CONFIG.ADDON_NAME, 1, 0.82, 0)
+        GameTooltip:AddLine("Drag to move this menu", 0.9, 0.9, 0.9)
+        GameTooltip:AddLine("Right-Click: put it back under its button", 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+    end)
+    dragHandle:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    menuFrame.dragHandle = dragHandle
 
     menuFrame:SetScript("OnShow", function(self)
         self:RegisterEvent("GLOBAL_MOUSE_DOWN")
@@ -2127,7 +2213,7 @@ local function EnsureSharedMenu()
     end)
     menuFrame.stackBarRow = stackBarRow
 
-    -- Footer Option 5: Auto-untrack others + Done button
+    -- Footer Option 5: Auto-untrack others + Done and Reset buttons
     local doneBtn = CreateFrame("Button", nil, menuFrame, "UIPanelButtonTemplate")
     doneBtn:SetSize(52, 20)
     doneBtn:SetText("Done")
@@ -2135,6 +2221,23 @@ local function EnsureSharedMenu()
         menuFrame:Hide()
     end)
     menuFrame.doneBtn = doneBtn
+
+    -- Reset: clears every reward filter and the search (same as right-clicking the Filter buttons)
+    local resetBtn = CreateFrame("Button", nil, menuFrame, "UIPanelButtonTemplate")
+    resetBtn:SetSize(52, 20)
+    resetBtn:SetText("Reset")
+    resetBtn:SetPoint("RIGHT", doneBtn, "LEFT", -4, 0)
+    resetBtn:SetScript("OnClick", function()
+        ResetAllFilters()
+    end)
+    resetBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine("Reset Filters", 1, 0.82, 0)
+        GameTooltip:AddLine("Clears every checked reward and the search, and restores your tracked quests.", 0.9, 0.9, 0.9, true)
+        GameTooltip:Show()
+    end)
+    resetBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    menuFrame.resetBtn = resetBtn
 
     local untrackRow = CreateFrame("Button", nil, menuFrame)
     untrackRow:SetHeight(20)
@@ -2760,6 +2863,22 @@ local function CreateRoundQuestPOI(parent, size, isComplete, isBackLayer, dimFac
 end
 
 -- Sub-Header Control Bar Under "Quests" (? & ••• Toggles + Sliders)
+-- EDIT: layout of the (?) / (•••) slider bar under the "Quests" header (pixels). width / x match the
+-- stacked cards (242 wide, 26 left) so the bar lines up with them; each control gets half the bar.
+-- top = gap below the header, gapBelow = gap before the first quest, valueW = room for "13%".
+local STACK_BAR_LAYOUT = {
+    width = 242, height = 22, x = -26, top = -4, gapBelow = 8,
+    iconSize = 20, iconGap = 4, valueGap = 3, valueW = 28, edgePad = 4, thumbW = 16,
+}
+
+-- Width of the gold fill so it ends under the centre of the slider's thumb
+local function StackSliderFillWidth(slider, pct)
+    local L = STACK_BAR_LAYOUT
+    local sw = slider.crqWidth or 60
+    local travel = math.max(1, sw - L.thumbW)
+    return math.max(2, math.floor(((pct - 1) / 49) * travel + L.thumbW / 2 - 1 + 0.5))
+end
+
 local function UpdateTrackerControlBarVisuals()
     if not trackerControlBar then return end
 
@@ -2769,7 +2888,7 @@ local function UpdateTrackerControlBarVisuals()
     trackerControlBar.turnInSlider.UpdatingFromCode = false
     trackerControlBar.turnInSlider:SetAlpha(turnInStackEnabled and 1.0 or 0.40)
 
-    local tFillW = math.max(2, math.floor((turnInRadiusPercent / 50.0) * 60))
+    local tFillW = StackSliderFillWidth(trackerControlBar.turnInSlider, turnInRadiusPercent)
     trackerControlBar.turnInSlider.fill:SetWidth(tFillW)
     trackerControlBar.turnInSlider.fill:SetShown(turnInStackEnabled)
     trackerControlBar.turnInValText:SetText(turnInStackEnabled and string.format("|cFFFFD100%d%%|r", turnInRadiusPercent) or "|cFF777777Off|r")
@@ -2780,7 +2899,7 @@ local function UpdateTrackerControlBarVisuals()
     trackerControlBar.incompSlider.UpdatingFromCode = false
     trackerControlBar.incompSlider:SetAlpha(incompleteStackEnabled and 1.0 or 0.40)
 
-    local iFillW = math.max(2, math.floor((incompleteRadiusPercent / 50.0) * 60))
+    local iFillW = StackSliderFillWidth(trackerControlBar.incompSlider, incompleteRadiusPercent)
     trackerControlBar.incompSlider.fill:SetWidth(iFillW)
     trackerControlBar.incompSlider.fill:SetShown(incompleteStackEnabled)
     trackerControlBar.incompValText:SetText(incompleteStackEnabled and string.format("|cFFFFD100%d%%|r", incompleteRadiusPercent) or "|cFF777777Off|r")
@@ -2790,8 +2909,9 @@ local function EnsureTrackerControlBar(hostContentsFrame)
     if not hostContentsFrame then return nil end
 
     if not trackerControlBar then
+        local L = STACK_BAR_LAYOUT
         local bar = CreateFrame("Frame", "CRQ_TrackerClusterBar", hostContentsFrame)
-        bar:SetSize(246, 24)
+        bar:SetSize(L.width, L.height)
         bar:EnableMouse(true)
 
         local bg = bar:CreateTexture(nil, "BACKGROUND")
@@ -2804,17 +2924,24 @@ local function EnsureTrackerControlBar(hostContentsFrame)
         botLine:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", 0, 0)
         ApplyHorizontalGradient(botLine, 0.72, 0.58, 0.22, 0.55, 0.0)
 
+        -- Each control owns half the bar: [icon] [slider ...........] [ 13%]
+        -- with the value right-aligned to the half's edge, so both halves mirror each other.
+        local half = math.floor(L.width / 2)
+        local sliderW = half - L.iconSize - L.iconGap - L.valueGap - L.valueW - L.edgePad
+        bar.crqLayout = { half = half, sliderW = sliderW }
+
         local function CreateClusterControl(isCompleteType, anchorLeftX)
             local toggleBtn = CreateFrame("Button", nil, bar)
-            toggleBtn:SetSize(20, 20)
+            toggleBtn:SetSize(L.iconSize, L.iconSize)
             toggleBtn:SetPoint("LEFT", bar, "LEFT", anchorLeftX, 0)
-            toggleBtn.poi = CreateRoundQuestPOI(toggleBtn, 20, isCompleteType, false, 1.0)
+            toggleBtn.poi = CreateRoundQuestPOI(toggleBtn, L.iconSize, isCompleteType, false, 1.0)
             toggleBtn.poi:SetAllPoints()
 
             local slider = CreateFrame("Slider", nil, bar)
             slider:SetOrientation("HORIZONTAL")
-            slider:SetSize(62, 14)
-            slider:SetPoint("LEFT", toggleBtn, "RIGHT", 5, 0)
+            slider:SetSize(sliderW, 14)
+            slider.crqWidth = sliderW
+            slider:SetPoint("LEFT", toggleBtn, "RIGHT", L.iconGap, 0)
             slider:SetMinMaxValues(1, 50)
             slider:SetValueStep(1)
             if slider.SetObeyStepOnDrag then slider:SetObeyStepOnDrag(true) end
@@ -2844,8 +2971,10 @@ local function EnsureTrackerControlBar(hostContentsFrame)
             slider:SetThumbTexture(thumb)
 
             local valText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            valText:SetPoint("LEFT", slider, "RIGHT", 4, 0)
-            valText:SetJustifyH("LEFT")
+            valText:SetWidth(L.valueW)
+            valText:SetPoint("RIGHT", bar, "LEFT", anchorLeftX + half - L.edgePad, 0)
+            valText:SetJustifyH("RIGHT")
+            valText:SetWordWrap(false)
 
             return toggleBtn, slider, valText
         end
@@ -2875,7 +3004,7 @@ local function EnsureTrackerControlBar(hostContentsFrame)
         bar.turnInSlider = tSlider
         bar.turnInValText = tVal
 
-        local iBtn, iSlider, iVal = CreateClusterControl(false, 132)
+        local iBtn, iSlider, iVal = CreateClusterControl(false, half)
         iBtn:SetScript("OnClick", function()
             incompleteStackEnabled = not incompleteStackEnabled
             SaveState()
@@ -2910,8 +3039,8 @@ local function EnsureTrackerControlBar(hostContentsFrame)
 
     trackerControlBar:SetParent(hostContentsFrame)
     trackerControlBar:ClearAllPoints()
-    trackerControlBar:SetPoint("TOPLEFT", hostContentsFrame, "TOPLEFT", -26, 0)
-    trackerControlBar:SetWidth(246)
+    trackerControlBar:SetPoint("TOPLEFT", hostContentsFrame, "TOPLEFT", STACK_BAR_LAYOUT.x, STACK_BAR_LAYOUT.top)
+    trackerControlBar:SetWidth(STACK_BAR_LAYOUT.width)
     trackerControlBar:Show()
     UpdateTrackerControlBarVisuals()
     return trackerControlBar
@@ -3556,7 +3685,8 @@ LayoutQuestTrackerStacks = function(isAnimationTick)
     -- Position the control bar, stacked card decks, and unstacked blocks inside hostContents
     local yCursor = 0
     if activeBar and activeBar:IsShown() then
-        yCursor = -30
+        local L = STACK_BAR_LAYOUT
+        yCursor = L.top - L.height - L.gapBelow       -- first quest starts below the bar
     end
 
     for _, item in ipairs(hostLayoutItems) do
@@ -3692,3 +3822,51 @@ loader:SetScript("OnEvent", function(self, event, arg1, arg2)
         end
     end
 end)
+
+-- ============================================================================
+-- SHARED WITH FieldTally.lua
+-- Read-only helpers passed to FieldTally.lua through the addon namespace (ns.CRQ).
+-- ============================================================================
+do
+    local _, ns = ...
+
+    -- A quest's rewards as scanned for the filters (up to maxCount): rewards that match the active
+    -- filter first, then the rest in scan order (currencies, items, gold). Returns copies, so the
+    -- caller can't change questRewardMap.
+    local function GetQuestRewardsForTally(questID, maxCount)
+        local qData = questID and questRewardMap[questID]
+        if not (qData and qData.order and qData.details) then return nil end
+        local list, picked = {}, {}
+        local function Add(rID)
+            local det = qData.details[rID]
+            if det and not picked[rID] and #list < (maxCount or 2) then
+                picked[rID] = true
+                table.insert(list, {
+                    id = rID, name = det.name, icon = det.icon, amount = det.amount or 1,
+                    isGold = (rID == "GOLD"), isGear = (rID == "ITEM_GEAR"), isCurrency = det.isCurrency == true,
+                    selected = selectedFilters[rID] == true,
+                })
+            end
+        end
+        for _, rID in ipairs(qData.order) do
+            if selectedFilters[rID] then Add(rID) end
+        end
+        for _, rID in ipairs(qData.order) do Add(rID) end
+        return (#list > 0) and list or nil
+    end
+
+    if type(ns) == "table" then
+        ns.CRQ = {
+            GetQuestRewardsForTally = GetQuestRewardsForTally,
+            GetQuestCoordsSafe = GetQuestCoordsSafe,
+            NormalizeToZoneMapID = NormalizeToZoneMapID,
+            IsQuestReadyForTurnIn = IsQuestReadyForTurnIn,
+            IsQuestSuperTracked = IsQuestSuperTracked,
+            IsQuestWatched = IsQuestWatched,
+            StripLeadingLevelTag = StripLeadingLevelTag,
+            DoesQuestMatchFilter = DoesQuestMatchFilter,
+            GetActiveFilterCount = GetActiveFilterCount,
+            GetIncompleteRadius = function() return incompleteRadiusPercent end,
+        }
+    end
+end

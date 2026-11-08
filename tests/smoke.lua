@@ -1,0 +1,822 @@
+-- Cache ReQuest smoke test (Lua 5.1, WoW's version). Loads the addon files in TOC order against
+-- tests/wowmock.lua and drives the Field Tally and the filter menu through their main paths.
+--   "C:\Program Files (x86)\Lua\5.1\lua.exe" tests\smoke.lua
+-- Must end with "N passed, 0 failed". Catches logic errors and crashes, not visuals.
+local here = (arg[0]:match("^(.*)[/\\]") or ".")
+dofile(here .. "/wowmock.lua")
+local root = arg[1] or (here .. "/..")
+
+local pass, fail = 0, 0
+local function check(cond, msg)
+    if cond then pass = pass + 1 else fail = fail + 1; print("FAIL: " .. msg) end
+end
+
+-- ---------------------------------------------------------------------------
+-- Load the files listed in the TOC, sharing one addon namespace like the client does
+-- ---------------------------------------------------------------------------
+local toc = assert(io.open(root .. "/CacheReQuest.toc", "rb"), "cannot open the TOC"):read("*a")
+local files, svAccount, svChar = {}, nil, nil
+for line in string.gmatch(toc, "[^\r\n]+") do
+    local sv = line:match("^## SavedVariables:%s*(.-)%s*$")
+    local svc = line:match("^## SavedVariablesPerCharacter:%s*(.-)%s*$")
+    if sv then svAccount = sv elseif svc then svChar = svc
+    elseif not line:match("^##") and line:match("%S") then table.insert(files, (line:gsub("%s+$", ""))) end
+end
+check(files[1] == "CacheReQuest.lua" and files[2] == "FieldTally.lua", "TOC loads CacheReQuest.lua, then FieldTally.lua")
+check(svAccount == "CRQ_TallyKnowledge", "TOC declares the account-wide CRQ_TallyKnowledge")
+check(svChar == "QRF_SavedState", "TOC keeps the per-character QRF_SavedState")
+
+local ns = {}
+for _, name in ipairs(files) do
+    local src = assert(io.open(root .. "/" .. name, "rb"), "cannot open " .. name):read("*a")
+    local chunk = assert(loadstring(src, name))
+    chunk("CacheReQuest", ns)
+end
+local T = ns.Tally
+local P = T and T.P
+check(T ~= nil and P ~= nil, "Field Tally loaded into the addon namespace")
+check(type(ns.CRQ) == "table" and type(ns.CRQ.GetQuestCoordsSafe) == "function" and type(ns.CRQ.DoesQuestMatchFilter) == "function"
+    and ns.CRQ.GetIncompleteRadius() == 16, "CacheReQuest.lua shares its helpers (read-only)")
+
+-- Count the main chunk's top-level locals (Lua allows 200)
+local function CountTopLocals(name)
+    local n = 0
+    for line in io.lines(root .. "/" .. name) do
+        local names = line:match("^local%s+function%s+([%w_]+)") or line:match("^local%s+([%w_,%s]+)")
+        if names then for _ in names:gmatch("[%w_]+") do n = n + 1 end end
+    end
+    return n
+end
+check(CountTopLocals("FieldTally.lua") < 40, "FieldTally.lua keeps its top-level locals low (" .. CountTopLocals("FieldTally.lua") .. ")")
+
+-- Event / frame helpers
+local NewRegion, allFrames
+do
+    local i = 1
+    while true do
+        local n, v = debug.getupvalue(CreateFrame, i)
+        if not n then break end
+        if n == "NewRegion" then NewRegion = v end
+        i = i + 1
+    end
+    i = 1
+    while true do
+        local n, v = debug.getupvalue(NewRegion, i)
+        if not n then break end
+        if n == "allFrames" then allFrames = v end
+        i = i + 1
+    end
+end
+local function Fire(event, ...)
+    for _, fr in ipairs(allFrames) do
+        if fr.__events and fr.__events[event] and fr.__scripts.OnEvent then fr.__scripts.OnEvent(fr, event, ...) end
+    end
+end
+local function RunTimers()
+    for _ = 1, 10 do
+        local list = TIMERS or {}
+        TIMERS = {}
+        if #list == 0 then return end
+        for _, t in ipairs(list) do t() end
+    end
+end
+local function Refresh(event) Fire(event or "QUEST_LOG_UPDATE"); RunTimers() end
+local function frames(n, dt)
+    local f = CRQ_FieldTally
+    for _ = 1, n do
+        NOW = NOW + (dt or 0.016)
+        local s = f:GetScript("OnUpdate")
+        if f:IsShown() and s then s(f, dt or 0.016) end
+    end
+end
+local function RowFor(itemName)
+    for _, fr in ipairs(allFrames) do
+        if fr.__kind == "FontString" and fr.__shown ~= false and type(fr.__text) == "string"
+            and fr.__text:find(itemName, 1, true) and fr.__parent and fr.__parent.box and fr.__parent.itemText == fr
+            and fr.__parent.__shown then
+            return fr.__parent
+        end
+    end
+end
+local function ShownTexts()
+    local out = {}
+    for _, fr in ipairs(allFrames) do
+        if fr.__kind == "FontString" and fr.__shown ~= false and type(fr.__text) == "string" and fr.__parent
+            and fr.__parent.box and fr.__parent.__shown and fr.__parent.itemText == fr then
+            table.insert(out, fr.__text)
+        end
+    end
+    return table.concat(out, "\n")
+end
+local function NearIDs()
+    local ids = {}
+    for _, q in ipairs(P.areas[1] and P.areas[1].quests or {}) do ids[q.questID] = true end
+    return ids
+end
+
+-- ---------------------------------------------------------------------------
+-- Boot
+-- ---------------------------------------------------------------------------
+EventRegistry = { RegisterCallback = function(self, ev, fn) EDITMODE_CB = (ev == "EditMode.Exit") and fn or EDITMODE_CB end }
+Fire("ADDON_LOADED", "CacheReQuest")
+Fire("PLAYER_ENTERING_WORLD")
+RunTimers()
+
+local f = CRQ_FieldTally
+check(f ~= nil, "tally frame exists")
+check(f and f:IsShown(), "tally shown when there are items to collect nearby")
+check(type(QRF_SavedState) == "table" and QRF_SavedState.fieldTally == T.db, "settings stored in QRF_SavedState.fieldTally")
+check(type(CRQ_TallyKnowledge) == "table" and CRQ_TallyKnowledge.spots == T.K.spots, "loot knowledge stored in CRQ_TallyKnowledge")
+
+-- 1) Only "collect an item" objectives
+check(T.IsCollectItemObjective("item") and not T.IsCollectItemObjective("monster") and not T.IsCollectItemObjective("object")
+    and not T.IsCollectItemObjective("event") and not T.IsCollectItemObjective("progressbar") and not T.IsCollectItemObjective(nil),
+    "only objective.type == \"item\" goes on the tally")
+check(T.ItemName("4/7 Small Spider Leg") == "Small Spider Leg" and T.ItemName("Small Spider Leg: 4/7") == "Small Spider Leg"
+    and T.ItemName("Small Spider Leg (4/7)") == "Small Spider Leg", "item name parsed from retail objective text")
+local texts = ShownTexts()
+check(texts:find("1/7|r  |c%x%x%x%x%x%x%x%xSmall Spider Leg"), "row reads '1/7  Small Spider Leg' with the count in its own ink")
+check(not texts:find("slain") and not texts:find("explored") and not texts:find("used") and not texts:find("progress"),
+    "kill, explore, use and progress-bar goals are not on the tally")
+check(T.quests[102] and #T.quests[102].itemObjectives == 0 and #T.quests[102].quantityObjectives == 4,
+    "a kill/explore quest is counted (for /crq debug) but has no tally items")
+check(T.quests[105] and T.quests[105].isTask and NearIDs()[105], "an active bonus objective (hidden task quest) is on Near me")
+check(T.quests[106] == nil, "a task quest you're not in stays off")
+local countHex = P.Hex(P.GetStyle().inkRed)
+check(texts:find("|c" .. countHex .. "1/7|r", 1, true), "count written in the look's contrasting ink")
+
+-- 2) Finished rows: tick, strike only across "count  name", separate "(turn in)"
+local strokes = {}
+local realDraw = P.DrawStroke
+P.DrawStroke = function(s, rel, x0, y0, x1, y1, ...)
+    table.insert(strokes, { s = s, rel = rel, x0 = x0, x1 = x1 })
+    return realDraw(s, rel, x0, y0, x1, y1, ...)
+end
+Refresh("ZONE_CHANGED")
+P.DrawStroke = realDraw
+local fangRow
+for _, fr in ipairs(allFrames) do
+    if fr.__kind == "FontString" and fr.__shown ~= false and fr.__text == "15/15  Gnarlpine Fang" then fangRow = fr end
+end
+check(fangRow ~= nil, "finished row text is just '15/15  Gnarlpine Fang'")
+local strike
+for _, st in ipairs(strokes) do if st.rel == fangRow then strike = st end end
+local textW = 6 * #"15/15  Gnarlpine Fang"
+check(strike and strike.x0 == -2 and strike.x1 == textW + 2, "strike spans only the count and name")
+local suffixShown = false
+for _, fr in ipairs(allFrames) do
+    if fr.__kind == "FontString" and fr.__shown ~= false and fr.__text == "(turn in)" then suffixShown = true end
+end
+check(suffixShown, "'(turn in)' written separately, unstruck")
+local tickDrawn = 0
+for _, st in ipairs(strokes) do if st.rel and st.rel.tick then tickDrawn = tickDrawn + 1 end end
+check(tickDrawn >= 3, "quill tick drawn in the box")
+local lines, widths = P.WrapLines(f.measureFS, "3/3  Very Long Ancient Kaldorei Relic Fragment", 100)
+local okW = #lines >= 2
+for i, ln in ipairs(lines) do if widths[i] ~= math.min(100, 6 * #ln) or 6 * #ln > 100 then okW = false end end
+check(okW, "wrapped finished text: one strike per line, each as wide as its words")
+
+-- 3) A row flashes when its count goes up
+QUESTS[2].objs[1].numFulfilled = 2; QUESTS[2].objs[1].text = "2/7 Small Spider Leg"
+Refresh()
+check(T.flashUntil["101_1"] and T.flashUntil["101_1"] > NOW, "count going up flashes the row")
+check(T.recent[101] == NOW, "...and marks the quest as just progressed (Near me for 3 minutes)")
+
+-- 4) Pages
+check(P.areas[1].title == "Near me" and P.areas[1].subtitle == "Dolanaar", "page 1 is Near me with your subzone")
+check(f.titleFS.__text:find("^Near me") and f.titleFS.__text:find("Dolanaar"), "heading: Near me · Dolanaar")
+check(NearIDs()[101] and NearIDs()[103], "items gathered beside you are on Near me")
+check(not NearIDs()[104], "a Darkshore quest isn't on Near me")
+local dark
+for _, a in ipairs(P.areas) do if a.title and a.title:find("Darkshore") then dark = a end end
+check(dark ~= nil, "Darkshore quest gets an area page (" .. tostring(dark and dark.title) .. ")")
+check(f.footerFS.__text:find("of %d+ gathered") and f.footerFS.__text:find("page 1 of " .. #P.areas),
+    "footer: 'n of m gathered · page 1 of N' (" .. tostring(f.footerFS.__text) .. ")")
+check(f.visibleBackSheets == math.min(#P.areas - 1, 3), "pages peek out underneath, one per other page")
+T.db.nearRadius = 1
+NOW = NOW + 200                                 -- "progressed in the last 3 minutes" wears off
+Refresh("ZONE_CHANGED")
+check(not NearIDs()[101], "smaller Near me distance drops items further away")
+local on2 = false
+for i = 2, #P.areas do for _, q in ipairs(P.areas[i].quests) do if q.questID == 101 then on2 = true end end end
+check(on2, "an item that leaves Near me moves onto an area page")
+
+local function Titles()
+    local t = {}
+    for i = 2, #P.areas do t[#t + 1] = P.areas[i].title end
+    table.sort(t)
+    return table.concat(t, "|")
+end
+C_MapExplorationInfo = { GetExploredAreaIDsAtPosition = function(mapID) return { (mapID == 62) and 2 or 1 } end }
+C_Map.GetAreaInfo = function(id) return (id == 2) and "Bashal'Aran" or "Dolanaar" end
+T.db.grouping = "AREA"; Refresh("ZONE_CHANGED")
+check(Titles() == "Bashal'Aran|Dolanaar", "Map areas: pages named by the explored subzone (" .. Titles() .. ")")
+T.db.grouping = "ZONE"; Refresh("ZONE_CHANGED")
+check(Titles() == "Darkshore|Teldrassil", "Zones: one page per zone (" .. Titles() .. ")")
+C_MapExplorationInfo = nil; wipe(P.areaNameCache)
+T.db.questAreas[101], T.db.questAreas[104] = "Dolanaar", "Dolanaar"
+T.db.grouping = "RADIUS"; Refresh("ZONE_CHANGED")
+check(Titles() == "Dolanaar", "Distance: same-named pages merge, never 'Dolanaar II' (" .. Titles() .. ")")
+T.db.opts.pagesFollowTracker = true
+check(P.GetPageRadius() == 16, "distance pages follow the tracker's (•••) radius")
+T.db.opts.pagesFollowTracker = false; T.db.pageRadius = 30
+check(P.GetPageRadius() == 30, "own page size when not following the tracker")
+T.db.opts.pagesFollowTracker = true
+T.db.questAreas[101], T.db.questAreas[104] = nil, nil
+T.db.grouping = "AREA"; T.db.nearRadius = 10
+Refresh("ZONE_CHANGED")
+
+-- 5) Dog-eared corner turns pages
+local corner = f.corner
+check(corner and corner:IsShown(), "dog-eared corner shown with several pages")
+corner:GetScript("OnEnter")(corner); frames(30)
+check(math.abs(corner.size - P.CORNER_HOVER) < 0.01, "hover lifts the corner")
+corner:GetScript("OnLeave")(corner); frames(30)
+check(math.abs(corner.size - P.CORNER_REST) < 0.01, "leaving lets it fall back")
+local nextArea = P.GetNeighborArea(1)
+corner:GetScript("OnClick")(corner, "LeftButton")
+check(f.shuffle ~= nil, "left-click starts the lift-and-slide page turn")
+frames(40)
+check(f.shuffle == nil and P.selectedKey == nextArea.key, "next page now on top")
+check(f.footerFS.__text:find("page 2 of"), "footer shows page 2")
+corner:GetScript("OnClick")(corner, "RightButton"); frames(40)
+check(P.selectedKey == P.CURRENT_KEY, "right-click turns back")
+for _ = 1, #P.areas do corner:GetScript("OnClick")(corner, "LeftButton"); frames(40) end
+check(P.selectedKey == P.CURRENT_KEY, "pages wrap around")
+local grip
+for _, fr in ipairs(allFrames) do if fr.gripTex and fr.__parent == f.chrome then grip = fr end end
+local gpt = grip and grip:GetPoint(1)
+check(gpt == "BOTTOMLEFT", "resize grip is bottom-left")
+T.scroll = 0
+f:GetScript("OnMouseWheel")(f, -1)
+check(T.scroll == 1, "mouse wheel scrolls the list")
+f:GetScript("OnMouseWheel")(f, 1)
+
+-- 6) New area: red heading, Near me back to the front
+if dark then P.SelectArea(dark.key, false) end
+SUBZONE = "Ban'ethil Barrow Den"
+Refresh("ZONE_CHANGED"); frames(40)
+check(P.selectedKey == P.CURRENT_KEY, "entering a new area turns back to Near me")
+check(P.currentGlowUntil > NOW, "heading in red ink for a few seconds")
+check(P.areas[1].subtitle == "Ban'ethil Barrow Den", "heading follows the new subzone")
+T.db.opts.autoFrontOnAreaChange = false
+if dark then P.SelectArea(dark.key, false) end
+SUBZONE = "Dolanaar"; Refresh("ZONE_CHANGED"); frames(40)
+check(P.selectedKey ~= P.CURRENT_KEY, "...unless that option is off")
+T.db.opts.autoFrontOnAreaChange = true
+P.SelectArea(P.CURRENT_KEY, false); frames(40)
+
+-- 7) Looted spots and droppers (start clean: section 3 already ticked one up where you stood)
+T.K.spots["101_1"] = nil
+UnitExists = function(u) return u == "target" and TARGET ~= nil end
+UnitIsDead = function() return TARGET and TARGET.dead or false end
+UnitIsPlayer = function() return false end
+UnitCanAttack = function() return TARGET and TARGET.hostile ~= false end
+UnitGUID = function(u) if u == "target" then return TARGET and TARGET.guid end end
+UnitName = function(u) if u == "player" then return "Tester" end return TARGET and TARGET.name end
+GetRealmName = function() return "Realm" end
+TARGET = { name = "Gnarlpine Ambusher", guid = "Creature-0-1-2-3-1994-0000ABCD", dead = true }
+Fire("LOOT_OPENED")
+check(T.lastLootMob and T.lastLootMob.key == "npc:1994", "loot window remembers the dead target's npc id")
+QUESTS[2].objs[1].numFulfilled = 3; QUESTS[2].objs[1].text = "3/7 Small Spider Leg"
+PX, PY = 0.30, 0.30
+Refresh()
+local spots = T.K.spots["101_1"]
+check(spots and #spots == 1 and spots[1].m == 57 and math.abs(spots[1].x - 0.30) < 1e-6 and spots[1].a == "Dolanaar",
+    "item progress records the spot where you looted it")
+local d1994 = T.K.droppers["npc:1994"]
+check(d1994 and d1994["101_1"] == 1 and d1994.label == "Gnarlpine Ambusher", "...and the mob it came from")
+check(T.K.owners["101_1"] and T.K.owners["101_1"]["Tester-Realm"], "loot knowledge knows whose quest log it belongs to")
+T.lastLootMob = nil
+QUESTS[2].objs[1].numFulfilled = 4; QUESTS[2].objs[1].text = "4/7 Small Spider Leg"
+PX, PY = 0.305, 0.30
+Refresh()
+check(#T.K.spots["101_1"] == 1 and T.K.spots["101_1"][1].n == 2, "a loot next to a known spot merges into it")
+GetLootSourceInfo = function() return "GameObject-0-1-2-3-4-5" end
+T.OnLootOpened()
+check(T.lastLootMob == nil, "a herb or chest (game object) isn't a mob")
+GetLootSourceInfo = nil
+TARGET = nil
+
+-- 8) Glow in the hunting grounds
+SUBZONE = "Starbreeze"; PX, PY = 0.31, 0.30
+Refresh("ZONE_CHANGED"); P.SelectArea(P.CURRENT_KEY, false); frames(40)
+local spiderRow = RowFor("Small Spider Leg")
+check(spiderRow and spiderRow.fxMode == "glow", "line glows in its hunting grounds (" .. tostring(spiderRow and spiderRow.fxMode) .. ")")
+frames(5)
+check(spiderRow and spiderRow.fx.inner[1].__shown and spiderRow.fx.outer[1].__shown, "glow halo from offset copies of the text")
+PX, PY = 0.90, 0.90; SUBZONE = "Rut'theran"
+Refresh("ZONE_CHANGED"); frames(40)
+spiderRow = RowFor("Small Spider Leg")
+check(not spiderRow or spiderRow.fxMode == nil, "no glow away from its hunting grounds")
+PX, PY = 0.55, 0.60; SUBZONE = "Dolanaar"; Refresh("ZONE_CHANGED"); frames(40)
+check(T.IsInHuntGrounds({ progKey = "101_1", questID = 101 }, { mapID = 99, sub = "dolanaar", pois = {} }),
+    "same subzone as a looted spot counts")
+check(T.IsInHuntGrounds({ progKey = "x", questID = 555 }, { mapID = 57, x = 0.5, y = 0.5, sub = "", pois = { [555] = { 0.53, 0.5 } } }),
+    "inside the quest's objective area counts")
+
+-- 9) Fire / smoulder from evidence
+check(P.NpcKey("Creature-0-3-0-0-1994-00001") == "npc:1994" and P.NpcKey("Player-1-0ABC") == nil, "npc id from GUIDs")
+check(P.NamesShareWord("Small Spider Leg", "Webwood Spider") and not P.NamesShareWord("Small Gland", "Small Wolf"),
+    "a distinctive shared word is a guess; generic words aren't")
+TARGET = { name = "Webwood Spider", guid = "Creature-0-1-2-3-1986-0001" }
+Refresh("PLAYER_TARGET_CHANGED"); frames(10)
+spiderRow = RowFor("Small Spider Leg")
+check(P.fire and P.fire.keys["101_1"] == "guess" and spiderRow and spiderRow.fxMode == "smoulder", "a name-only guess smoulders")
+check(spiderRow and not spiderRow.fx.haze.__shown and spiderRow.fx.embers[1].__shown and not spiderRow.fx.embers[3].__shown,
+    "smoulder: a couple of embers, no heat haze")
+GetNumLootItems = function() return 2 end
+GetLootSlotInfo = function(slot) if slot == 1 then return "tex", "Small Spider Leg", 1 end return "tex", "Silk Cloth", 1 end
+GetLootSourceInfo = function() return "Creature-0-1-2-3-1986-0001", 1 end
+TARGET.dead = true
+Fire("LOOT_OPENED")
+local d1986 = T.K.droppers["npc:1986"]
+check(d1986 and d1986["101_1"] == 1 and d1986.loots == 1 and d1986.label == "Webwood Spider", "loot window: the item came from this npc (sure)")
+Fire("LOOT_OPENED")
+check(d1986["101_1"] == 1 and d1986.loots == 1, "re-opening the same corpse isn't counted twice")
+TARGET = { name = "Webwood Spider", guid = "Creature-0-1-2-3-1986-0009" }
+Refresh("PLAYER_TARGET_CHANGED"); frames(10)
+spiderRow = RowFor("Small Spider Leg")
+check(P.fire.keys["101_1"] == "sure" and spiderRow.fxMode == "fire", "a known dropper sets the line on fire")
+check(spiderRow.fx.haze.__shown and spiderRow.fx.embers[6].__shown, "fire: heat haze and rising embers")
+GetLootSlotInfo = function() return "tex", "Silk Cloth", 1 end
+for i = 1, 4 do
+    GetLootSourceInfo = function() return "Creature-0-1-2-3-2000-000" .. i, 1 end
+    Fire("LOOT_OPENED")
+end
+TARGET = { name = "Giant Spider Matriarch", guid = "Creature-0-1-2-3-2000-0099" }
+Refresh("PLAYER_TARGET_CHANGED")
+check(P.fire == nil, "4 loots without the item rule the guess out")
+GetNumLootItems, GetLootSlotInfo, GetLootSourceInfo = nil, nil, nil
+C_QuestLog.UnitIsRelatedToActiveQuest = function() return false end
+TARGET = { name = "Lurking Spider", guid = "Creature-0-1-2-3-3000-0001" }
+Refresh("PLAYER_TARGET_CHANGED")
+check(P.fire == nil, "UnitIsRelatedToActiveQuest false rules the guess out")
+C_QuestLog.UnitIsRelatedToActiveQuest = nil
+Enum.TooltipDataLineType = { QuestObjective = 8, QuestTitle = 17, QuestPlayer = 18 }
+TARGET = { name = "Moonkin", guid = "Creature-0-1-2-3-7000-0003" }
+C_TooltipInfo = { GetUnit = function() return { lines = { { leftText = "Moonkin", type = 2 }, { leftText = "Bashal'Aran", type = 17 },
+    { leftText = " - 0/8 Grell Earring", type = 8 } } } end }
+Refresh("PLAYER_TARGET_CHANGED")
+check(P.fire and P.fire.keys["104_1"] == "sure", "the unit tooltip naming the item is sure")
+check(T.tooltipShowsQuests, "learned that this client's unit tooltips list quests")
+TARGET = { name = "Forest Spider", guid = "Creature-0-1-2-3-4000-0001" }
+C_TooltipInfo = { GetUnit = function() return { lines = { { leftText = "Forest Spider", type = 2 }, { leftText = "Level 5", type = 0 } } } end }
+Refresh("PLAYER_TARGET_CHANGED")
+check(P.fire == nil, "tooltips list quests here and this one doesn't: no guess")
+T.tooltipShowsQuests = nil
+C_TooltipInfo = nil
+TARGET = { name = "Webwood Spider", guid = "Creature-0-1-2-3-1986-0004", hostile = false }
+Refresh("PLAYER_TARGET_CHANGED")
+check(P.fire == nil, "friendly NPCs never light the tally")
+
+-- 9b) 12.x secret values: hidden unit data pauses detection, never errors
+local SECRET = setmetatable({}, { __eq = function() error("compared a secret") end,
+    __index = function() error("indexed a secret") end, __tostring = function() error("printed a secret") end })
+issecretvalue = function(v) return rawequal(v, SECRET) end
+TARGET = { name = SECRET, guid = SECRET }
+local errsBefore = #ERRORS
+local reported = 0
+local realReport = T.ReportError
+T.ReportError = function(e) reported = reported + 1; print("REPORTED: " .. tostring(e)) end
+Refresh("PLAYER_TARGET_CHANGED")
+GetNumLootItems = function() return 1 end
+GetLootSlotInfo = function() return "tex", SECRET, 1 end
+GetLootSourceInfo = function() return SECRET, 1 end
+Fire("LOOT_OPENED")
+C_TooltipInfo = { GetUnit = function() return { lines = { { leftText = SECRET, type = SECRET } } } end }
+TARGET = { name = "Webwood Spider", guid = SECRET }
+Refresh("PLAYER_TARGET_CHANGED")
+T.ReportError = realReport
+check(reported == 0 and #ERRORS == errsBefore, "secret names, GUIDs, loot and tooltip lines are skipped without errors")
+check(P.fire == nil or P.fire.keys["101_1"] ~= "sure", "no sure drop from hidden data")
+GetNumLootItems, GetLootSlotInfo, GetLootSourceInfo, C_TooltipInfo, issecretvalue = nil, nil, nil, nil, nil
+TARGET = nil
+Refresh("PLAYER_TARGET_CHANGED"); frames(5)
+check(P.fire == nil, "fire goes out when you drop the target")
+T.db.opts.inkEffects = false; Refresh("ZONE_CHANGED")
+spiderRow = RowFor("Small Spider Leg")
+check(spiderRow and spiderRow.fxMode == nil, "ink effects can be switched off")
+T.db.opts.inkEffects = true
+
+-- 10) Click = super-track (like the tracker's quest icon); right-click = quest log
+local stID = 0
+C_SuperTrack.GetSuperTrackedQuestID = function() return stID end
+C_SuperTrack.SetSuperTrackedQuestID = function(id) stID = id end
+C_QuestLog.GetQuestsOnMap = function(m) if m == 57 then return { { questID = 101, x = 0.40, y = 0.40 } } end return {} end
+local watchBefore = {}
+for k in pairs(WATCHED) do watchBefore[k] = true end
+Refresh("ZONE_CHANGED")
+spiderRow = RowFor("Small Spider Leg")
+spiderRow:GetScript("OnClick")(spiderRow, "LeftButton")
+check(stID == 101, "click super-tracks the item's quest")
+local sameWatch = true
+for k in pairs(WATCHED) do if not watchBefore[k] then sameWatch = false end end
+for k in pairs(watchBefore) do if not WATCHED[k] then sameWatch = false end end
+check(sameWatch, "...without changing watches")
+spiderRow = RowFor("Small Spider Leg")
+check(spiderRow and spiderRow.lasso and spiderRow.lasso[1].main.__shown, "the tracked quest's items get a red ink circle")
+spiderRow:GetScript("OnClick")(spiderRow, "LeftButton")
+check(stID == 0, "click again stops tracking")
+spiderRow = RowFor("Small Spider Leg")
+check(spiderRow and not spiderRow.lasso[1].main.__shown, "circle gone once untracked")
+local openedQuest
+QuestMapFrame_OpenToQuestDetails = function(id) openedQuest = id end
+spiderRow:GetScript("OnClick")(spiderRow, "RightButton")
+check(openedQuest == 101, "right-click opens the quest log at the quest")
+openedQuest = nil
+InCombatLockdown = function() return true end
+local realPrint = print
+print = function() end
+spiderRow:GetScript("OnClick")(spiderRow, "RightButton")
+print = realPrint
+check(openedQuest == nil, "in combat the quest log waits")
+InCombatLockdown = function() return false end
+Fire("PLAYER_REGEN_ENABLED")
+check(openedQuest == 101, "...and opens when combat ends")
+local addonSrc = io.open(root .. "/FieldTally.lua", "rb"):read("*a")
+check(not addonSrc:find("WorldMapFrame:AddDataProvider") and not addonSrc:find("WorldMapFrame.ScrollContainer"),
+    "the tally draws nothing on the world map")
+
+-- 11) Hover: tooltip lines + map preview + placement
+local ttLines = {}
+local realAdd = GameTooltip.AddLine
+GameTooltip.AddLine = function(self, t) table.insert(ttLines, tostring(t)) end
+spiderRow:GetScript("OnEnter")(spiderRow)
+GameTooltip.AddLine = realAdd
+local tt = table.concat(ttLines, " | ")
+check(tt:find("Recipe of the Kaldorei") and tt:find("%[7%]"), "tooltip: quest title and level")
+check(tt:find("Small Spider Leg: 4 / 7"), "tooltip: 'Item: 4 / 7'")
+check(tt:find("Found it in 1 spot"), "tooltip: found it in N spots")
+check(tt:find("Looted from: .*Webwood Spider %(1 of 1%)"), "tooltip: looted from with counts (" .. tt .. ")")
+check(tt:find("Left%-Click: track this quest") and tt:find("Right%-Click: open the quest log"), "tooltip: click hints")
+local pv = T.mapPreview
+check(pv and pv.__shown, "hover shows the map preview")
+check(pv and pv.title.__text:find("Teldrassil") and pv.title.__text:find("Small Spider Leg"), "preview names zone and item")
+local pvRings = 0
+for _, c in ipairs(pv and pv.child.circles or {}) do if c.__shown then pvRings = pvRings + 1 end end
+check(pvRings == 2, "preview rings the looted spot and the objective area (" .. pvRings .. ")")
+check(pv and pv.you.__shown, "preview marks the player")
+C_Map.GetMapArtLayers = function() return { { layerWidth = 1002, layerHeight = 668, tileWidth = 256, tileHeight = 256 } } end
+C_Map.GetMapArtLayerTextures = function() local t = {}; for i = 1, 12 do t[i] = 10000 + i end; return t end
+spiderRow:GetScript("OnEnter")(spiderRow)
+local tilesShown = 0
+for _, t in ipairs(pv.tiles) do if t.__shown then tilesShown = tilesShown + 1 end end
+check(tilesShown == 12, "preview draws the zone's own map tiles")
+check(pv.child.__w > P.PREVIEW_W and pv.child.__w <= P.PREVIEW_W / 0.35 + 1, "zoomed in, but never closer than a third of the zone")
+spiderRow:GetScript("OnLeave")(spiderRow)
+check(not pv.__shown, "preview hides with the tooltip")
+T.db.opts.mapPreview = false
+spiderRow:GetScript("OnEnter")(spiderRow)
+check(not pv.__shown, "map preview can be switched off")
+T.db.opts.mapPreview = true
+spiderRow:GetScript("OnLeave")(spiderRow)
+f.__rect = { 40, 200, 230, 175 }
+GameTooltip.__rect = { 290, 300, 260, 80 }
+ChatFrame1.__rect = { 40, 10, 430, 150 }
+spiderRow:GetScript("OnEnter")(spiderRow)
+local tpt, trel, trp = GameTooltip:GetPoint(1)
+check(tpt == "TOPLEFT" and trel == spiderRow and trp == "TOPRIGHT", "tooltip opens on the roomier side of the tally")
+local _, prel, _, ppx, ppy = pv:GetPoint(1)
+local PR = { l = ppx, b = ppy, r = ppx + pv:GetWidth(), t = ppy + pv:GetHeight() }
+check(prel == UIParent and P.Overlap(PR, P.TallyRect()) == 0 and P.Overlap(PR, P.ScreenRect(GameTooltip, 0)) == 0,
+    "preview clear of the tally and tooltip")
+check(P.Overlap(PR, P.ScreenRect(ChatFrame1, 0)) == 0, "preview clear of chat")
+check(PR.l >= 0 and PR.b >= 0 and PR.r <= UIParent:GetWidth() and PR.t <= UIParent:GetHeight(), "preview fully on screen")
+f.__rect = { 1650, 200, 230, 175 }
+GameTooltip.__rect = { 1380, 300, 260, 80 }
+spiderRow:GetScript("OnEnter")(spiderRow)
+check(GameTooltip:GetPoint(1) == "TOPRIGHT", "tally at the right edge: tooltip opens on its left")
+spiderRow:GetScript("OnLeave")(spiderRow)
+f.__rect, GameTooltip.__rect, ChatFrame1.__rect = nil, nil, nil
+C_Map.GetMapArtLayers, C_Map.GetMapArtLayerTextures = nil, nil
+
+-- 12) Minimap pins
+Minimap = CreateFrame("Frame", "Minimap"); Minimap.__w, Minimap.__h = 140, 140
+GetCVar = function() return "0" end
+stID = 101
+T.UpdateMinimapPins()
+check(P.mmPins and P.mmPins[1].__shown and P.mmPins[1].__alpha < 1, "a far-off spot sits on the rim")
+PX, PY = 0.3030, 0.3010
+T.UpdateMinimapPins()
+local _, _, _, mx, my = P.mmPins[1]:GetPoint(1)
+check(P.mmPins[1].__alpha == 1 and math.sqrt(mx * mx + my * my) < 64, "a nearby spot is inside the minimap")
+GetCVar = function() return "1" end
+GetPlayerFacing = function() return math.pi / 2 end
+T.UpdateMinimapPins()
+local _, _, _, rx, ry = P.mmPins[1]:GetPoint(1)
+check(math.abs(math.sqrt(rx * rx + ry * ry) - math.sqrt(mx * mx + my * my)) < 0.01 and (math.abs(rx - mx) > 0.01 or math.abs(ry - my) > 0.01),
+    "Rotate Minimap turns the pins around the player")
+GetCVar, GetPlayerFacing = function() return "0" end, nil
+local pinTip = {}
+GameTooltip.AddLine = function(self, t) table.insert(pinTip, tostring(t)) end
+P.mmPins[1]:GetScript("OnEnter")(P.mmPins[1])
+GameTooltip.AddLine = realAdd
+check(table.concat(pinTip, "|"):find("Small Spider Leg"), "hovering a pin names the item")
+T.db.opts.minimapPins = false; T.UpdateMinimapPins()
+check(not P.mmPins[1].__shown, "minimap pins can be switched off")
+T.db.opts.minimapPins = true
+stID = 0; T.UpdateMinimapPins()
+check(not P.mmPins[1].__shown, "no pins without a super-tracked quest")
+PX, PY = 0.55, 0.60
+
+-- 13) Looks and handwriting
+check(T.db.look == "HANDKERCHIEF" and P.GetStyle().label == "Handkerchief notes", "handkerchief notes is the default look")
+local function CountShown(list) local n = 0; for _, t in ipairs(list or {}) do if t.__shown then n = n + 1 end end; return n end
+local cp = f.topSheet.clothParts
+check(cp and CountShown(cp.corner) == 4 and CountShown(cp.lace) > 60 and CountShown(cp.eye) == CountShown(cp.lace),
+    "handkerchief: rounded corners, scalloped lace with eyelets")
+check(f.topSheet.hem[1].__shown and f.topSheet.hem2[1].__shown and #f.topSheet.stitches > 10 and f.topSheet.folds[1].__shown
+    and f.topSheet.drape[1].__shown, "handkerchief: woven band and stripe, running stitch, creases, drape wrinkles")
+check(CountShown(f.topSheet.segs[2]) == 0, "handkerchief: no torn paper edges")
+P.CycleStyle(); P.ApplyStyle(); Refresh("ZONE_CHANGED")
+check(T.db.look == "PARCHMENT" and f.topSheet.grain.__shown and CountShown(f.topSheet.segs[2]) > 20, "parchment: torn edges and grain")
+check(P.INK[1] == 0.17, "parchment: iron-gall ink from its style table")
+P.CycleStyle(); P.ApplyStyle(); Refresh("ZONE_CHANGED")
+check(T.db.look == "NATIVE" and f.visibleBackSheets == 0 and not f.shadowSheet.__shown, "transparent window: no page pile")
+check(f.titleFS.inkKey:find("^PLAIN:"), "transparent window uses the standard font")
+SlashCmdList["CACHEREQUEST"]("look handkerchief")
+check(T.db.look == "HANDKERCHIEF" and f.styleKey == "HANDKERCHIEF", "/crq look handkerchief")
+local fonts = {}
+for _ = 1, 3 do P.CycleFontStyle(); fonts[#fonts + 1] = T.db.font end
+check(table.concat(fonts, ",") == "SCRAWL,PLAIN,QUILL", "handwriting cycles quill > scrawl > plain")
+check(P.FONT_STYLES[1].path == "Fonts\\MORPHEUS.TTF" and P.FONT_STYLES[2].path == "Fonts\\SKURRI.TTF", "built-in client fonts only")
+check(not addonSrc:find("%.tga") and not addonSrc:find("%.blp") and not addonSrc:find("Interface\\\\AddOns"), "no art files")
+
+-- 14) Default position above the chat tabs; recomputed after Edit Mode
+local pt, _, relPt, defX, defY = f:GetPoint(1)
+check(pt == "BOTTOMLEFT" and relPt == "BOTTOMLEFT" and defX == 100 + P.PILE_MARGIN_X and defY == 500 + 32 + P.PILE_MARGIN_Y,
+    "default spot sits above the chat tabs with room for the pile (" .. tostring(defX) .. "," .. tostring(defY) .. ")")
+ChatFrame1Tab = CreateFrame("Frame", "ChatFrame1Tab"); ChatFrame1Tab:SetPoint("BOTTOMLEFT", 0, 60)
+check(EDITMODE_CB ~= nil, "registered for Edit Mode exit")
+EDITMODE_CB(); RunTimers()
+local _, _, _, _, ey = f:GetPoint(1)
+check(ey == 560 + P.PILE_MARGIN_Y, "after Edit Mode the spot is recomputed from the chat tab (" .. tostring(ey) .. ")")
+ChatFrame1Tab = nil
+
+-- 15) Reward filter
+local realCount, realMatch = ns.CRQ.GetActiveFilterCount, ns.CRQ.DoesQuestMatchFilter
+ns.CRQ.GetActiveFilterCount = function() return 1 end
+ns.CRQ.DoesQuestMatchFilter = function(id) return id == 104 end
+Refresh("ZONE_CHANGED")
+check(not NearIDs()[101] and not NearIDs()[103], "with a reward filter on, only matching quests' items show")
+ns.CRQ.GetActiveFilterCount, ns.CRQ.DoesQuestMatchFilter = realCount, realMatch
+check(realCount() == 0, "no real reward filter is set at this point")
+Refresh("ZONE_CHANGED")
+check(NearIDs()[101], "with no reward filter, everything shows")
+
+-- 16) Saved settings: defaults, validation, reload
+QRF_SavedState.fieldTally = { look = "BOGUS", font = "PLAIN", nearRadius = 999, opts = { inkEffects = false, showTabs = "yes" },
+    frame = { width = 5000 } }
+Fire("ADDON_LOADED", "CacheReQuest")
+check(T.db.look == "HANDKERCHIEF" and T.db.font == "PLAIN", "unknown look ignored, valid font kept")
+check(T.db.nearRadius == 50 and T.db.opts.inkEffects == false and T.db.opts.showTabs == true, "out-of-range / wrong-type values fall back")
+check(T.db.frame.width == 520 and T.db.frame.height == 175 and T.db.opts.minimapPins == true, "missing settings get their defaults")
+check(QRF_SavedState.fieldTally == T.db, "loaded settings are what gets saved")
+Fire("ADDON_LOADED", "SomeOtherAddon")
+check(T.db.font == "PLAIN", "other addons' ADDON_LOADED is ignored")
+T.db.font = "QUILL"; T.db.opts.inkEffects = true; T.db.nearRadius = 10
+check(T.K.spots["101_1"] ~= nil, "loot knowledge survives the reload")
+
+-- 17) Pruning shared loot knowledge
+T.K.spots["999_1"] = { { m = 57, x = 0.1, y = 0.1 } }
+T.K.droppers["wolf"] = { ["999_1"] = 2, label = "Wolf" }
+T.K.owners["999_1"] = { ["Tester-Realm"] = true }
+T.K.spots["888_1"] = { { m = 57, x = 0.2, y = 0.2 } }
+T.K.owners["888_1"] = { ["Alt-Realm"] = true }
+T.K.spots["777_1"] = { { m = 57, x = 0.3, y = 0.3 } }
+T.K.owners["777_1"] = { ["Tester-Realm"] = true }
+C_QuestLog.IsQuestFlaggedCompleted = function(id) return id == 777 end
+T.PruneHuntData()
+check(T.K.spots["999_1"] == nil and T.K.droppers["wolf"] == nil, "abandoned quest's spots and droppers pruned")
+check(T.K.spots["101_1"] ~= nil and T.K.droppers["npc:1994"] ~= nil, "live quest's knowledge kept")
+check(T.K.spots["888_1"] ~= nil, "an alt's quest isn't pruned by this character")
+check(T.K.spots["777_1"] ~= nil and T.K.kept["777_1"], "a turned-in quest's knowledge is kept for alts for a while")
+local realTime = time
+time = function() return realTime() + 31 * 86400 end
+T.PruneHuntData()
+time = realTime
+check(T.K.spots["777_1"] == nil, "...and forgotten after " .. P.KEEP_DONE_DAYS .. " days")
+C_QuestLog.IsQuestFlaggedCompleted = nil
+
+-- 18) Options panel, gear, slash
+check(SETTINGS_CAT and SETTINGS_CAT.panel == CRQ_OptionsPanel, "Settings canvas panel registered")
+SlashCmdList["CACHEREQUEST"]("")
+check(OPENED_SETTINGS == 99 and CRQ_OptionsPanel.__shown, "/crq opens the options")
+local labels = {}
+for _, w in ipairs(T.optionWidgets) do
+    if w.label then labels[#labels + 1] = w.label.__text elseif w.__text then labels[#labels + 1] = w.__text end
+end
+local L = table.concat(labels, " | ")
+for _, want in ipairs({ "Show the Field Tally", "Look:", "Handwriting:", "Pages for other areas", "Area pages by:",
+    "Turn back to", "Hide the tally when nothing is nearby", "Glowing & burning ink", "Little map", "minimap" }) do
+    check(L:find(want, 1, true), "options include '" .. want .. "'")
+end
+local sliders = 0
+for _, w in ipairs(T.optionWidgets) do if w.slider then sliders = sliders + 1 end end
+check(sliders == 2, "options have Near me distance and page-size sliders")
+local showCb
+for _, w in ipairs(T.optionWidgets) do if w.label and w.label.__text == "Show the Field Tally" then showCb = w end end
+showCb:SetChecked(false); showCb:GetScript("OnClick")(showCb)
+check(T.db.show == false and not f:IsShown(), "unticking Show hides the tally")
+SlashCmdList["CACHEREQUEST"]("tally")
+check(T.db.show == true and f:IsShown(), "/crq tally brings it back")
+check(showCb:GetChecked() == true, "options panel follows the slash command")
+T.db.frame.useDefaultAnchor = false; T.db.frame.x = 999
+SlashCmdList["CACHEREQUEST"]("reset")
+check(T.db.frame.useDefaultAnchor == true and T.db.frame.width == 230, "/crq reset restores the default spot and size")
+f.optBtn:GetScript("OnClick")(f.optBtn, "LeftButton")
+check(CRQ_OptionsPanel.__shown, "the gear on the tally opens the options")
+InCombatLockdown = function() return true end
+OPENED_SETTINGS = nil
+print = function() end
+SlashCmdList["CACHEREQUEST"]("options")
+print = realPrint
+check(OPENED_SETTINGS == nil, "options don't open in combat")
+InCombatLockdown = function() return false end
+Fire("PLAYER_REGEN_ENABLED")
+check(OPENED_SETTINGS == 99, "...they open when combat ends")
+local printed = {}
+print = function(s) table.insert(printed, tostring(s)) end
+local okDbg, errDbg = pcall(SlashCmdList["CACHEREQUEST"], "debug")
+print = realPrint
+local dump = table.concat(printed, "\n")
+check(okDbg and dump:find("%[type=monster%]") and dump:find("%[type=item%]") and dump:find("%[type=progressbar%]"),
+    "/crq debug lists every counted objective with its type: " .. tostring(errDbg))
+check(dump:find("|cFF40FF40%+|r Recipe of the Kaldorei: Small Spider Leg"), "/crq debug marks what's on the tally")
+check(SLASH_CACHEREQUEST1 == "/crq", "slash command /crq")
+
+-- 19) Hide when nothing is nearby
+T.db.opts.hideWhenNothingNearby = true
+PX, PY = 0.05, 0.95; SUBZONE = "Nowhere"; NOW = NOW + 400
+for _, q in ipairs(QUESTS) do if q.questID == 105 then q.active = false end end
+Refresh("QUEST_LOG_UPDATE"); Refresh("ZONE_CHANGED")
+check(#P.areas[1].items == 0 and not f:IsShown(), "hides when nothing near you needs gathering")
+T.db.opts.hideWhenNothingNearby = false
+Refresh("ZONE_CHANGED")
+check(f:IsShown() and #P.areas > 1, "...and stays up for the other pages when that option is off")
+
+-- 20) Options gear on the Objective Tracker
+local gear = CRQ_TrackerOptionsButton
+check(gear ~= nil and gear.__shown, "options gear on the Objective Tracker")
+local gp, grel, grp = gear:GetPoint(1)
+check(gp == "RIGHT" and grel == QRF_TrackerFilterButton and grp == "LEFT", "gear sits just left of the Filter button")
+check(gear:GetParent() == QRF_TrackerFilterButton:GetParent(), "gear lives on the tracker header with the Filter button")
+OPENED_SETTINGS = nil
+gear:GetScript("OnClick")(gear, "LeftButton")
+check(OPENED_SETTINGS == 99, "clicking the gear opens the options")
+gear:GetScript("OnClick")(gear, "RightButton")
+check(T.db.show == false and not f:IsShown(), "right-clicking the gear puts the tally away")
+gear:GetScript("OnClick")(gear, "RightButton")
+check(T.db.show == true and f:IsShown(), "...and brings it back")
+local gearCb
+for _, w in ipairs(T.optionWidgets) do if w.label and w.label.__text == "Options gear on the Objective Tracker" then gearCb = w end end
+check(gearCb ~= nil, "options have a switch for the tracker gear")
+gearCb:SetChecked(false); gearCb:GetScript("OnClick")(gearCb)
+check(not gear.__shown and T.db.opts.trackerGear == false, "the gear can be switched off")
+gearCb:SetChecked(true); gearCb:GetScript("OnClick")(gearCb)
+check(gear.__shown, "...and back on")
+
+-- 21) Quest rewards at the right of the item line
+PX, PY = 0.55, 0.60; SUBZONE = "Dolanaar"; NOW = NOW + 400
+C_QuestLog.GetQuestsOnMap = nil          -- back to the waypoint coords (section 10 moved 101's objective area)
+C_QuestLog.GetQuestRewardCurrencies = function(id)
+    if id == 101 then return { { currencyID = 2815, name = "Resonance Crystals", texture = 5172976, totalRewardAmount = 250 } } end
+    return {}
+end
+GetNumQuestLogRewards = function(id) return (id == 103) and 1 or 0 end
+GetQuestLogRewardInfo = function() return "Fang Charm", 133434, 1, 2, true, 5555 end
+QUESTS[4].objs[1].text = "15/15 Pristine Gnarlpine Fang From The Deep Barrow Den"
+Refresh("QUEST_LOG_UPDATE"); P.SelectArea(P.CURRENT_KEY, false); Refresh("ZONE_CHANGED"); frames(40)
+local rl = ns.CRQ.GetQuestRewardsForTally(101)
+check(rl and rl[1].name == "Resonance Crystals" and rl[1].amount == 250 and rl[1].isCurrency, "Cache ReQuest's reward scan is shared with the tally")
+check(ns.CRQ.GetQuestRewardsForTally(104) == nil and P.RewardBadge(104, P.GetStyle()) == nil, "a quest without rewards gets no reward text")
+local st = P.GetStyle()
+local contentW = math.max(150, f:GetWidth() - 12 - 2 * (st.pad or 0))
+spiderRow = RowFor("Small Spider Leg")
+check(spiderRow and spiderRow.rewardText.__shown and spiderRow.rewardText.__text:find("5172976", 1, true)
+    and spiderRow.rewardText.__text:find("250", 1, true), "item line shows the quest's currency icon and amount")
+check(spiderRow.rewardText.__text:find("|c" .. P.Hex(st.reward), 1, true), "reward amount inked in the look's reward colour")
+local rp, rrel, rrp = spiderRow.rewardText:GetPoint(1)
+check(rp == "TOPRIGHT" and rrel == spiderRow and rrp == "TOPRIGHT", "rewards are aligned from the right")
+local spiderRewardW = math.min(6 * #spiderRow.rewardText.__text, contentW * P.REWARD_MAX_SHARE)
+check(spiderRow.textW < contentW - 24 and spiderRow.textW + 24 + P.REWARD_GAP + spiderRewardW <= contentW + 1,
+    "item text column stops a buffer short of the rewards (" .. tostring(spiderRow.textW) .. ")")
+local fangLine
+for _, fr in ipairs(allFrames) do
+    if fr.__kind == "FontString" and fr.__shown ~= false and type(fr.__text) == "string" and fr.__text:find("Pristine", 1, true)
+        and fr.__parent and fr.__parent.itemText == fr then fangLine = fr end
+end
+local fangR = fangLine and fangLine.__parent
+check(fangR and fangR.rewardText.__shown and fangR.rewardText.__text:find("133434", 1, true)
+    and not fangR.rewardText.__text:find("|c", 1, true), "a single item reward shows just its icon")
+check(fangLine and fangLine.__text:find("\n"), "a long item name wraps before the rewards")
+local strokes2 = {}
+P.DrawStroke = function(s, rel, x0, y0, x1, y1, ...)
+    table.insert(strokes2, { rel = rel, x1 = x1 })
+    return realDraw(s, rel, x0, y0, x1, y1, ...)
+end
+P.Render(f)
+P.DrawStroke = realDraw
+local maxX1 = 0
+for _, s in ipairs(strokes2) do if s.rel == fangLine then maxX1 = math.max(maxX1, s.x1) end end
+check(maxX1 > 0 and maxX1 <= fangR.textW + 2, "every strike stays left of the rewards (" .. maxX1 .. " vs " .. tostring(fangR.textW) .. ")")
+local rewardTip = {}
+GameTooltip.AddLine = function(self, t) table.insert(rewardTip, tostring(t)) end
+spiderRow:GetScript("OnEnter")(spiderRow)
+GameTooltip.AddLine = realAdd
+spiderRow:GetScript("OnLeave")(spiderRow)
+local rtt = table.concat(rewardTip, " | ")
+check(rtt:find("Rewards:", 1, true) and rtt:find("250 Resonance Crystals", 1, true), "tooltip lists the rewards by name (" .. rtt .. ")")
+P.SelectArea(P.CURRENT_KEY, false)
+T.db.opts.showRewards = false; Refresh("ZONE_CHANGED")
+spiderRow = RowFor("Small Spider Leg")
+check(spiderRow and not spiderRow.rewardText.__shown and spiderRow.textW == contentW - 24, "rewards can be switched off (full-width text again)")
+T.db.opts.showRewards = true; Refresh("ZONE_CHANGED")
+
+-- 22) Filter menu: movable (remembered per button) and a Reset button inside it
+local tbtn = QRF_TrackerFilterButton
+tbtn:GetScript("OnClick")(tbtn, "LeftButton")
+local menu = QRF_DropdownMenu
+check(menu and menu.__shown, "tracker Filter button opens the filter menu")
+local mp, mrel, mrp = menu:GetPoint(1)
+check(mp == "TOPRIGHT" and mrel == tbtn and mrp == "BOTTOMRIGHT", "first time it opens under the button")
+check(menu.dragHandle and menu:GetScript("OnDragStart") and menu.dragHandle:GetScript("OnDragStart"), "menu can be dragged (header or empty space)")
+menu:SetPoint("TOPRIGHT", tbtn, "BOTTOMRIGHT", 37, -120)       -- where the drag left it (mock: left 137, top 380)
+menu.dragHandle:GetScript("OnDragStart")(menu.dragHandle)
+menu.dragHandle:GetScript("OnDragStop")(menu.dragHandle)
+local savedPos = QRF_SavedState.menuPositions and QRF_SavedState.menuPositions.TRACKER
+check(savedPos and savedPos.x == 137 and savedPos.y == 380, "dragged spot saved for the tracker's menu")
+check(QRF_SavedState.menuPositions.QUESTLOG == nil, "the Quest Log's menu keeps its own spot")
+tbtn:GetScript("OnClick")(tbtn, "LeftButton")
+check(not menu.__shown, "clicking the Filter button again closes it")
+tbtn:GetScript("OnClick")(tbtn, "LeftButton")
+mp, mrel, mrp = menu:GetPoint(1)
+local _, _, _, mx2, my2 = menu:GetPoint(1)
+check(menu.__shown and mp == "TOPLEFT" and mrel == UIParent and mrp == "BOTTOMLEFT" and mx2 == 137 and my2 == 380,
+    "it reopens where you dragged it")
+QRF_SavedState.menuPositions = { TRACKER = { x = 50, y = 600 }, BOGUS = { x = 1 }, QUESTLOG = { x = "no" } }
+Fire("ADDON_LOADED", "CacheReQuest")
+menu:Hide(); tbtn:GetScript("OnClick")(tbtn, "LeftButton")
+local _, _, _, lx, ly = menu:GetPoint(1)
+check(lx == 50 and ly == 600, "saved menu position survives a reload (bad entries ignored)")
+menu.dragHandle:GetScript("OnMouseUp")(menu.dragHandle, "RightButton")
+mp, mrel = menu:GetPoint(1)
+check(mp == "TOPRIGHT" and mrel == tbtn, "right-clicking the header puts it back under its button")
+check(QRF_SavedState.menuPositions and QRF_SavedState.menuPositions.TRACKER == nil, "...and forgets the dragged spot")
+
+-- Reset button inside the menu
+check(menu.resetBtn and menu.resetBtn.__text == "Reset", "the menu has a Reset button")
+local rp2, rrel2, rrp2 = menu.resetBtn:GetPoint(1)
+check(rp2 == "RIGHT" and rrel2 == menu.doneBtn and rrp2 == "LEFT", "Reset sits beside Done")
+local crystalRow
+for _, fr in ipairs(allFrames) do
+    if fr.__kind == "FontString" and fr.__shown ~= false and type(fr.__text) == "string" and fr.__text:find("Resonance Crystals", 1, true)
+        and fr.__parent and fr.__parent.check and fr.__parent.__parent == menu then crystalRow = fr.__parent end
+end
+check(crystalRow ~= nil, "the menu lists the quest's currency")
+crystalRow:GetScript("OnClick")(crystalRow)
+check(ns.CRQ.GetActiveFilterCount() == 1, "ticking a reward sets a filter")
+local enabledState
+local realSetEnabled = menu.resetBtn.SetEnabled
+menu.resetBtn.SetEnabled = function(self, v) enabledState = v end
+menu.resetBtn:GetScript("OnClick")(menu.resetBtn)
+check(ns.CRQ.GetActiveFilterCount() == 0, "Reset clears every filter")
+check(enabledState == false, "Reset greys out when there's nothing left to reset")
+menu.resetBtn.SetEnabled = realSetEnabled
+check(menu.__shown, "the menu stays open after a reset")
+menu:Hide()
+
+-- 23) (?) / (•••) slider bar under the tracker's "Quests" header
+local contents = QuestObjectiveTracker.ContentsFrame
+contents.__w = 248
+local blockA = CreateFrame("Frame", nil, contents); blockA.id = 101; blockA.__h = 36; blockA.__w = 248
+local blockB = CreateFrame("Frame", nil, contents); blockB.id = 102; blockB.__h = 36; blockB.__w = 248
+blockA.HeaderText = blockA:CreateFontString(); blockB.HeaderText = blockB:CreateFontString()
+contents.GetChildren = function() return blockA, blockB end
+QuestObjectiveTracker:Update()
+local bar = CRQ_TrackerClusterBar
+check(bar ~= nil and bar.__shown, "slider bar shown above tracked quests")
+local bp, brel, brp, bx, by = bar:GetPoint(1)
+check(bp == "TOPLEFT" and brel == contents and bx == -26 and by == -4, "bar lines up with the stacked cards, a gap below the header")
+check(bar.__w == 242, "bar is exactly as wide as the stacked cards (" .. tostring(bar.__w) .. ")")
+local L = bar.crqLayout
+check(L and L.half == 121 and 20 + 4 + L.sliderW + 3 + 28 + 4 == L.half, "each control fills exactly half the bar")
+check(bar.turnInSlider.__w == L.sliderW and bar.incompSlider.__w == L.sliderW, "both sliders the same width")
+local _, _, _, tgx = bar.turnInToggle:GetPoint(1)
+local _, _, _, igx = bar.incompToggle:GetPoint(1)
+check(tgx == 0 and igx == L.half, "(?) starts the left half, (•••) starts the right half")
+local tvp, tvrel, _, tvx = bar.turnInValText:GetPoint(1)
+local _, _, _, ivx = bar.incompValText:GetPoint(1)
+check(tvp == "RIGHT" and tvrel == bar and tvx == L.half - 4 and ivx == 242 - 4, "values right-aligned inside their half, nothing past the cards")
+local fillW = bar.turnInSlider.fill.__w
+check(fillW == math.floor((15 / 49) * (L.sliderW - 16) + 8 - 1 + 0.5) and fillW < L.sliderW, "gold fill ends under the thumb (" .. tostring(fillW) .. ")")
+local _, _, _, _, firstY = blockA:GetPoint(1)
+check(firstY == -4 - 22 - 8, "first quest starts below the bar with a gap (" .. tostring(firstY) .. ")")
+
+-- 24) Ticker keeps it current and nothing errored
+check(type(TICKER) == "function", "proximity ticker running")
+TICKER()
+check(#ERRORS == 0, "no Lua errors reported (" .. #ERRORS .. ")")
+print(string.format("\n%d passed, %d failed", pass, fail))
+os.exit(fail == 0 and 0 or 1)

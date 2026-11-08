@@ -1,0 +1,4 @@
+package-as: CacheReQuest
+ignore:
+  - README.md
+  - tests

@@ -35,6 +35,8 @@ function methods:GetScript(k) return self.__scripts[k] end
 function methods:HookScript(k, fn) local old = self.__scripts[k]; self.__scripts[k] = function(...) if old then old(...) end fn(...) end end
 function methods:SetPoint(p, rel, rp, x, y) table.insert(self.__points, { p, rel, rp, x, y }); self.__px = (type(rel) == "number" and rel) or x or 0; self.__py = (type(rp) == "number" and rp) or y or 0 end
 function methods:ClearAllPoints() self.__points = {} end
+function methods:SetAttribute(k, v) self.__attr = self.__attr or {}; self.__attr[k] = v end
+function methods:GetAttribute(k) return self.__attr and self.__attr[k] end
 function methods:GetPoint(i) local pt = self.__points[i or 1]; if pt then return pt[1], pt[2], pt[3], pt[4], pt[5] end end
 function methods:GetCenter() return 300 + (self.__px or 0), 400 + (self.__py or 0) end
 function methods:GetLeft() return 100 + (self.__px or 0) end
@@ -55,7 +57,10 @@ function methods:GetText() return self.__text end
 function methods:GetStringWidth() return 6 * #tostring(self.__text or "") end
 function methods:GetUnboundedStringWidth() return 6 * #tostring(self.__text or "") end
 function methods:GetStringHeight() return 12 end
-function methods:GetFont() return "Fonts\\FRIZQT__.TTF", 12, "" end
+function methods:SetFont(path, size, flags) self.__font = { path, size, flags }; return true end
+function methods:GetFont() local f = self.__font; if f then return f[1], f[2], f[3] end return "Fonts\\FRIZQT__.TTF", 12, "" end
+function methods:SetMinMaxValues(a, b) self.__min, self.__max = a, b end
+function methods:GetMinMaxValues() return self.__min or 0, self.__max or 1 end
 function methods:GetChecked() return self.__checked end
 function methods:SetChecked(v) self.__checked = v end
 function methods:IsMouseEnabled() return self.__mouse end

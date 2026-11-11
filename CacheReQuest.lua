@@ -3434,6 +3434,164 @@ local function PopulateTrackerStackDeck(deck, clusterGroup)
     end
 end
 
+-- ============================================================================
+-- QUEST ITEM BUTTONS ON DECKS
+-- A quest with a usable item (an eye, a phial...) still stacks; its item gets our own button to the LEFT
+-- of the deck: in a row beside the collapsed deck, gliding next to its own card as the deck fans out.
+-- Blizzard's button lives on the quest's tracker block, which the deck hides, so these are our own secure
+-- item buttons (SecureActionButtonTemplate, type "item": they work in combat). Secure frames can only be
+-- set up, moved or shown out of combat: in combat they stay put (the stack layout is frozen then anyway)
+-- and catch up when combat ends. Parented to UIParent and placed by screen position, never anchored to a
+-- deck: that would make the deck protected and break its hover animation.
+-- ============================================================================
+local ItemBtns = { size = 24, pool = {} }
+
+function ItemBtns.Acquire(i)
+    local b = ItemBtns.pool[i]
+    if b then return b end
+    b = CreateFrame("Button", "CacheReQuestQuestItem" .. i, UIParent, "SecureActionButtonTemplate")
+    b:SetSize(ItemBtns.size, ItemBtns.size)
+    b:SetFrameStrata("MEDIUM")
+    b:SetFrameLevel(30)
+    b:RegisterForClicks("AnyUp", "AnyDown")
+    b:SetAttribute("type", "item")
+    b.bg = b:CreateTexture(nil, "BACKGROUND")
+    b.bg:SetPoint("TOPLEFT", -1, 1)
+    b.bg:SetPoint("BOTTOMRIGHT", 1, -1)
+    b.bg:SetColorTexture(0, 0, 0, 0.85)
+    b.icon = b:CreateTexture(nil, "ARTWORK")
+    b.icon:SetAllPoints()
+    b.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+    b:SetPushedTexture("Interface\\Buttons\\UI-Quickslot-Depress")
+    b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+    b.count:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -1, 1)
+    local okC, cd = pcall(CreateFrame, "Cooldown", nil, b, "CooldownFrameTemplate")
+    if okC and cd then
+        cd:SetAllPoints()
+        b.cooldown = cd
+    end
+    b:SetScript("OnEnter", function(self)
+        if not self.link then return end
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        pcall(GameTooltip.SetHyperlink, GameTooltip, self.link)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    b:Hide()
+    ItemBtns.pool[i] = b
+    return b
+end
+
+-- Can this client make secure item buttons? (If not, quests with items stay out of decks instead.)
+function ItemBtns.Supported()
+    if ItemBtns.ok == nil then
+        if InCombatLockdown() then return false end          -- ask again out of combat
+        local ok, b = pcall(ItemBtns.Acquire, 1)
+        ItemBtns.ok = (ok and b and b.SetAttribute) and true or false
+    end
+    return ItemBtns.ok
+end
+
+-- The usable item the tracker shows for this quest, or nil (a finished quest only if showItemWhenComplete)
+function ItemBtns.Info(entry)
+    local logIdx = entry.logIdx
+    if (not logIdx or logIdx >= 999) and C_QuestLog and C_QuestLog.GetLogIndexForQuestID then
+        logIdx = C_QuestLog.GetLogIndexForQuestID(entry.questID)
+    end
+    if not (GetQuestLogSpecialItemInfo and logIdx and logIdx > 0 and logIdx < 999) then return nil end
+    local ok, link, tex, charges, showWhenComplete = pcall(GetQuestLogSpecialItemInfo, logIdx)
+    if not ok or not (link or tex) then return nil end
+    if entry.isComplete and not showWhenComplete then return nil end
+    return { link = link, tex = tex, charges = charges, logIndex = logIdx }
+end
+
+function ItemBtns.UpdateCooldown(b)
+    if not (b.cooldown and GetQuestLogSpecialItemCooldown and b.logIndex) then return end
+    local ok, start, dur, enable = pcall(GetQuestLogSpecialItemCooldown, b.logIndex)
+    if ok and start and dur and dur > 0 and enable ~= 0 then
+        b.cooldown:SetCooldown(start, dur)
+    elseif b.cooldown.Clear then
+        b.cooldown:Clear()
+    end
+end
+
+function ItemBtns.Set(b, it)
+    if b.link ~= it.link then
+        b:SetAttribute("type", "item")
+        b:SetAttribute("item", it.link)                   -- used from your bags, like the tracker's own button
+    end
+    b.link, b.logIndex = it.link, it.logIndex
+    b.icon:SetTexture(it.tex)
+    b.count:SetText((it.charges and it.charges > 1) and tostring(it.charges) or "")
+    ItemBtns.UpdateCooldown(b)
+end
+
+-- A button beside every deck quest with an item: a row left of the collapsed deck (the top card's item
+-- nearest), gliding next to each quest's own card as the deck fans out
+function ItemBtns.Place()
+    if InCombatLockdown() then ItemBtns.dirty = true; return end
+    ItemBtns.dirty = false
+    local used = 0
+    if ItemBtns.Supported() then
+        local ui = UIParent:GetEffectiveScale()
+        local size, gap = ItemBtns.size, 4
+        for _, deck in ipairs(trackerStackDeckPool) do
+            local quests = deck.clusterData and deck.clusterData.quests
+            if deck:IsVisible() and quests and deck:GetLeft() and deck:GetTop() then
+                local s = deck:GetEffectiveScale() / ui
+                local p = deck.expandProgress or 0
+                local deckLeft, deckTop = deck:GetLeft() * s, deck:GetTop() * s
+                local k = 0
+                for i, q in ipairs(quests) do
+                    if i > (deck.numActiveCards or 0) then break end
+                    local it = q.questItem
+                    if it and it.link then
+                        used = used + 1
+                        local b = ItemBtns.Acquire(used)
+                        ItemBtns.Set(b, it)
+                        local x, y = deckLeft - gap - k * (size + 3), deckTop - 4
+                        local card = deck.cards[i]
+                        if p > 0.02 and card and card:IsShown() and card:GetLeft() and card:GetTop() then
+                            local cx, cy = card:GetLeft() * s - gap, card:GetTop() * s - 4
+                            x, y = x + (cx - x) * p, y + (cy - y) * p
+                        end
+                        b:ClearAllPoints()
+                        b:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", x, y)
+                        b.questID = q.questID
+                        b:Show()
+                        k = k + 1
+                    end
+                end
+            end
+        end
+    end
+    for i = used + 1, #ItemBtns.pool do ItemBtns.pool[i]:Hide() end
+end
+
+-- Does this quest show a usable item button in the tracker (an eye, a phial...)? The button sits on the
+-- quest's own tracker block, which a deck hides, and protected buttons can't be shown or moved in combat,
+-- so such quests are never stacked. Asks the game first (a finished quest only keeps its button if
+-- showItemWhenComplete), then looks for a shown item button on the block itself.
+local function QuestBlockHasItemButton(entry)
+    local logIdx = entry.logIdx
+    if (not logIdx or logIdx >= 999) and C_QuestLog and C_QuestLog.GetLogIndexForQuestID then
+        logIdx = C_QuestLog.GetLogIndexForQuestID(entry.questID)
+    end
+    if GetQuestLogSpecialItemInfo and logIdx and logIdx > 0 and logIdx < 999 then
+        local ok, link, tex, _, showWhenComplete = pcall(GetQuestLogSpecialItemInfo, logIdx)
+        if ok and (link or tex) then
+            return (not entry.isComplete) or (showWhenComplete and true) or false
+        end
+    end
+    local blk = entry.frame
+    for _, key in ipairs({ "itemButton", "ItemButton" }) do
+        local btn = blk and rawget(blk, key)
+        if type(btn) == "table" and btn.IsShown and btn:IsShown() then return true end
+    end
+    return false
+end
+
 -- Spatial Clustering Using True Retail Zone Map Coordinates (Ignores mismatched Quest Log headers when mapID matches)
 local function BuildTrackerClustersForBlocks(rawBlocks)
     wipe(trackerClusters)
@@ -3444,7 +3602,11 @@ local function BuildTrackerClustersForBlocks(rawBlocks)
 
     for _, bEntry in ipairs(rawBlocks) do
         bEntry.clusterID = nil
-        if bEntry.isComplete then
+        bEntry.questItem = ItemBtns.Info(bEntry)
+        bEntry.hasQuestItem = (bEntry.questItem ~= nil) or QuestBlockHasItemButton(bEntry)
+        if bEntry.hasQuestItem and not (bEntry.questItem and bEntry.questItem.link and ItemBtns.Supported()) then
+            -- no secure buttons (or no item link to give one): the quest keeps its own tracker line and button
+        elseif bEntry.isComplete then
             table.insert(readyPool, bEntry)
         else
             table.insert(incompPool, bEntry)
@@ -3624,6 +3786,7 @@ LayoutQuestTrackerStacks = function(isAnimationTick)
             SetNativeBlockHiddenByStack(blkEntry.frame, false)
         end
         isLayingOutStacks = false
+        pcall(ItemBtns.Place)
         return
     end
 
@@ -3719,6 +3882,7 @@ LayoutQuestTrackerStacks = function(isAnimationTick)
     end
 
     isLayingOutStacks = false
+    pcall(ItemBtns.Place)
 end
 
 -- Restores all blocks and lets Blizzard refresh trackers before re-stacking
@@ -3766,7 +3930,16 @@ loader:RegisterEvent("QUEST_LOG_UPDATE")
 loader:RegisterEvent("QUEST_WATCH_LIST_CHANGED")
 loader:RegisterEvent("SUPER_TRACKING_CHANGED")
 loader:RegisterEvent("QUEST_DATA_LOAD_RESULT")
+loader:RegisterEvent("PLAYER_REGEN_ENABLED")
+loader:RegisterEvent("BAG_UPDATE_COOLDOWN")
 loader:SetScript("OnEvent", function(self, event, arg1, arg2)
+    if event == "PLAYER_REGEN_ENABLED" then
+        pcall(ItemBtns.Place)                       -- item buttons catch up after combat
+        return
+    elseif event == "BAG_UPDATE_COOLDOWN" then
+        for _, b in ipairs(ItemBtns.pool) do if b:IsShown() then ItemBtns.UpdateCooldown(b) end end
+        return
+    end
     if event == "ADDON_LOADED" then
         LoadState()
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -3867,6 +4040,12 @@ do
             DoesQuestMatchFilter = DoesQuestMatchFilter,
             GetActiveFilterCount = GetActiveFilterCount,
             GetIncompleteRadius = function() return incompleteRadiusPercent end,
+            -- tracker stacks (read by the tests: quests with an item button stay out of decks)
+            QuestBlockHasItemButton = QuestBlockHasItemButton,
+            BuildTrackerClustersForBlocks = BuildTrackerClustersForBlocks,
+            GetTrackerClusters = function() return trackerClusters end,
+            ItemBtns = ItemBtns,
+            GetDeckPool = function() return trackerStackDeckPool end,
         }
     end
 end

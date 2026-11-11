@@ -127,6 +127,10 @@ check(f ~= nil, "tally frame exists")
 check(f and f:IsShown(), "tally shown when there are items to collect nearby")
 check(type(QRF_SavedState) == "table" and QRF_SavedState.fieldTally == T.db, "settings stored in QRF_SavedState.fieldTally")
 check(type(CRQ_TallyKnowledge) == "table" and CRQ_TallyKnowledge.spots == T.K.spots, "loot knowledge stored in CRQ_TallyKnowledge")
+check(T.db.opts.tallyLoot and T.db.opts.tallyTasks and not T.db.opts.tallySeparate, "new characters list items and tasks, together")
+-- the item tests below were written for an items-only tally; the tasks block near the end switches tasks on
+T.db.opts.tallyTasks = false
+Refresh("ZONE_CHANGED")
 
 -- 1) Only "collect an item" objectives
 check(T.IsCollectItemObjective("item") and not T.IsCollectItemObjective("monster") and not T.IsCollectItemObjective("object")
@@ -156,7 +160,8 @@ Refresh("ZONE_CHANGED")
 P.DrawStroke = realDraw
 local fangRow
 for _, fr in ipairs(allFrames) do
-    if fr.__kind == "FontString" and fr.__shown ~= false and fr.__text == "15/15  Gnarlpine Fang" then fangRow = fr end
+    if fr.__kind == "FontString" and fr.__shown ~= false and fr.__text == "15/15  Gnarlpine Fang"
+        and fr.__parent and fr.__parent.itemText == fr then fangRow = fr end
 end
 check(fangRow ~= nil, "finished row text is just '15/15  Gnarlpine Fang'")
 local strike
@@ -572,7 +577,8 @@ local function CheckImageLook(key, file, pad, shadowA, inkR, corner)
     check(distinct, key .. ": pages underneath are the same image, each flipped differently and darker")
     check(f.visibleBackSheets == math.min(#P.areas - 1, 3), key .. ": pages peek out underneath")
     local _, _, _, cx, cy = f.content:GetPoint(1)
-    check(f.pad == pad and cx == 6 + pad and cy == -28 - pad, key .. ": writing kept " .. pad .. "px inside the material")
+    local pl, pt = P.GetPads(f)
+    check(pl >= pad and pt >= pad and cx == 6 + pl and cy == -28 - pt, key .. ": writing kept inside the material (" .. pl .. "," .. pt .. ")")
     check(math.abs(P.INK[1] - inkR) < 1e-9, key .. ": ink colour from its style table")
     local cpt, crel, crp, ccx, ccy = f.corner:GetPoint(1)
     check(cpt == "BOTTOMRIGHT" and crel == f.chrome and ccx == -math.floor(f:GetWidth() * corner[1] + 0.5)
@@ -593,8 +599,8 @@ local function CheckImageLook(key, file, pad, shadowA, inkR, corner)
     f:SetSize(T.db.frame.width, T.db.frame.height)
 end
 CheckImageLook("CRUMPLED", "crumpled_paper", 8, 0.35, 0.20, { 0.036, 0.034 })
-CheckImageLook("RAG", "torn_rag", 20, 0.32, 0.15, { 0.068, 0.046 })
-P.CycleStyle(); P.ApplyStyle(); Refresh("ZONE_CHANGED")
+CheckImageLook("RAG", "torn_rag", 8, 0.32, 0.15, { 0.068, 0.046 })
+T.db.look = "NATIVE"; P.ApplyStyle(); Refresh("ZONE_CHANGED")
 check(T.db.look == "NATIVE" and f.visibleBackSheets == 0 and not f.shadowSheet.__shown, "transparent window: no page pile")
 check(f.titleFS.inkKey:find("^PLAIN:"), "transparent window uses the standard font")
 check(f.topSheet.body.__tex == "color" and f.topSheet.body.__tc and table.concat(f.topSheet.body.__tc, ",") == "0,1,0,1",
@@ -603,12 +609,12 @@ local cpt2, _, _, ncx, ncy = f.corner:GetPoint(1)
 check(ncx == 3 and ncy == -3, "the page corner goes back to the frame's corner")
 local styleKeys = {}
 for _, s in ipairs(P.STYLES) do styleKeys[#styleKeys + 1] = s.key end
-check(table.concat(styleKeys, ",") == "HANDKERCHIEF,PARCHMENT,CRUMPLED,RAG,NATIVE", "five looks, in cycle order")
+check(table.concat(styleKeys, ",") == "HANDKERCHIEF,PARCHMENT,CRUMPLED,RAG,STONE,BARK,LEAF,LEATHER,ARCANE,NATIVE", "ten looks, in cycle order")
 SlashCmdList["CACHEREQUEST"]("look handkerchief")
 check(T.db.look == "HANDKERCHIEF" and f.styleKey == "HANDKERCHIEF", "/crq look handkerchief")
 local fonts = {}
-for _ = 1, 3 do P.CycleFontStyle(); fonts[#fonts + 1] = T.db.font end
-check(table.concat(fonts, ",") == "SCRAWL,PLAIN,QUILL", "handwriting cycles quill > scrawl > plain")
+for _ = 1, 4 do P.CycleFontStyle(); fonts[#fonts + 1] = T.db.font end
+check(table.concat(fonts, ",") == "SCRAWL,PLAIN,BLOTTED,QUILL", "handwriting cycles quill > scrawl > plain > blotted")
 check(P.FONT_STYLES[1].path == "Fonts\\MORPHEUS.TTF" and P.FONT_STYLES[2].path == "Fonts\\SKURRI.TTF", "built-in client fonts only")
 -- the source names one addon folder (P.TEXTURE_DIR), and every image look points at a file that exists
 local refs, s = 0, 1
@@ -624,7 +630,7 @@ for _, st in ipairs(P.STYLES) do
         if not FileExists(root .. "/" .. rel .. ".tga") then imagesExist = false end
     end
 end
-check(refs == 1 and imagesExist and not addonSrc:find("%.blp"), "the only art files are the two images in this addon's textures folder")
+check(refs == 1 and imagesExist and not addonSrc:find("%.blp"), "the only art files are the images in this addon's textures folder")
 
 -- 14) Default position above the chat tabs; recomputed after Edit Mode
 local pt, _, relPt, defX, defY = f:GetPoint(1)
@@ -659,6 +665,7 @@ check(QRF_SavedState.fieldTally == T.db, "loaded settings are what gets saved")
 Fire("ADDON_LOADED", "SomeOtherAddon")
 check(T.db.font == "PLAIN", "other addons' ADDON_LOADED is ignored")
 T.db.font = "QUILL"; T.db.opts.inkEffects = true; T.db.nearRadius = 10
+T.db.opts.tallyTasks = false            -- the reload brought back the defaults: items-only again for the tests below
 check(T.K.spots["101_1"] ~= nil, "loot knowledge survives the reload")
 
 -- 17) Pruning shared loot knowledge
@@ -691,13 +698,14 @@ for _, w in ipairs(T.optionWidgets) do
     if w.label then labels[#labels + 1] = w.label.__text elseif w.__text then labels[#labels + 1] = w.__text end
 end
 local L = table.concat(labels, " | ")
-for _, want in ipairs({ "Show the Field Tally", "Look:", "Handwriting:", "Pages for other areas", "Area pages by:",
-    "Turn back to", "Hide the tally when nothing is nearby", "Glowing & burning ink", "Little map", "minimap" }) do
+for _, want in ipairs({ "Show the Field Tally", "Look:", "Handwriting:", "Pages for other areas", "Other pages by: ",
+    "Turn back to", "...only when something is nearby", "Glowing & burning ink", "Little map", "minimap",
+    "List quest items", "List tasks", "Tasks apart from items" }) do
     check(L:find(want, 1, true), "options include '" .. want .. "'")
 end
 local sliders = 0
 for _, w in ipairs(T.optionWidgets) do if w.slider then sliders = sliders + 1 end end
-check(sliders == 2, "options have Near me distance and page-size sliders")
+check(sliders == 3, "options have Text size, Near me distance and cluster-size sliders")
 local showCb
 for _, w in ipairs(T.optionWidgets) do if w.label and w.label.__text == "Show the Field Tally" then showCb = w end end
 showCb:SetChecked(false); showCb:GetScript("OnClick")(showCb)
@@ -770,12 +778,14 @@ end
 GetNumQuestLogRewards = function(id) return (id == 103) and 1 or 0 end
 GetQuestLogRewardInfo = function() return "Fang Charm", 133434, 1, 2, true, 5555 end
 QUESTS[4].objs[1].text = "15/15 Pristine Gnarlpine Fang From The Deep Barrow Den"
+T.db.look = "HANDKERCHIEF"; P.ApplyStyle()      -- the reload above brought back the rag; these widths assume the hanky
 Refresh("QUEST_LOG_UPDATE"); P.SelectArea(P.CURRENT_KEY, false); Refresh("ZONE_CHANGED"); frames(40)
 local rl = ns.CRQ.GetQuestRewardsForTally(101)
 check(rl and rl[1].name == "Resonance Crystals" and rl[1].amount == 250 and rl[1].isCurrency, "Cache ReQuest's reward scan is shared with the tally")
 check(ns.CRQ.GetQuestRewardsForTally(104) == nil and P.RewardBadge(104, P.GetStyle()) == nil, "a quest without rewards gets no reward text")
 local st = P.GetStyle()
-local contentW = math.max(150, f:GetWidth() - 12 - 2 * (st.pad or 0))
+local padL, _, padR = P.GetPads(f)
+local contentW = math.max(150, f:GetWidth() - 12 - padL - padR)
 spiderRow = RowFor("Small Spider Leg")
 check(spiderRow and spiderRow.rewardText.__shown and spiderRow.rewardText.__text:find("5172976", 1, true)
     and spiderRow.rewardText.__text:find("250", 1, true), "item line shows the quest's currency icon and amount")
@@ -897,9 +907,198 @@ check(fillW == math.floor((15 / 49) * (L.sliderW - 16) + 8 - 1 + 0.5) and fillW 
 local _, _, _, _, firstY = blockA:GetPoint(1)
 check(firstY == -4 - 22 - 8, "first quest starts below the bar with a gap (" .. tostring(firstY) .. ")")
 
+-- 23b) Ported from Handkerquest 2.3: tasks and their toggles, new looks, margins that follow the window,
+-- the material fold, wet ink, Blotted scrawl, text size, the one-line heading, the chat note
+-- (a function of its own: the main chunk is near Lua's 200-local limit)
+;(function()
+    PX, PY = 0.55, 0.60; SUBZONE = "Dolanaar"; NOW = NOW + 400
+    T.db.look = "RAG"; T.db.font = "QUILL"; T.db.show = true; T.db.opts.showTabs = true
+    T.db.opts.hideWhenNothingNearby = false; P.ApplyStyle(); P.SelectArea(P.CURRENT_KEY, false)
+
+    -- tasks: the kill/explore quest's goals, only because it has several
+    local q102 = T.quests[102]
+    check(q102 and #q102.taskObjectives == 4 and q102.taskObjectives[1].kind == "slay" and q102.taskObjectives[2].kind == "task"
+        and q102.taskObjectives[2].single and not q102.taskObjectives[1].single, "a quest with several goals: a slay line and one-off steps")
+    check(T.ObjectiveKind(nil, "Ambushers killed") == "slay" and T.ObjectiveKind(nil, "Skillful lad") == "task", "untyped goals: slay words, whole words only")
+    T.db.opts.tallyTasks = true; Refresh("ZONE_CHANGED")
+    local texts = ShownTexts()
+    check(texts:find("0/6|r  |c%x+Gnarlpine Ambusher slain") and texts:find("|c%x+Cenarion Hold depths entrance explored|r"),
+        "tasks on the tally: '0/6  Gnarlpine Ambusher slain' and a one-off step without a count")
+    check(f.footerFS.__text:find("done"), "footer counts what's done, not just gathered (" .. tostring(f.footerFS.__text) .. ")")
+
+    -- the three toggles beside the gear
+    local qb = f.quickBtns
+    check(qb and qb.items and qb.tasks and qb.separate and qb.items.__w == 16, "basket, sword and tasks-apart toggles beside the gear")
+    local _, sepRel, _, sepX = qb.separate:GetPoint(1)
+    check(sepRel == f.optBtn and sepX == -P.QUICK_GEAR_GAP and #qb.items.strokes == 13 and #qb.tasks.strokes == 4, "toggles spaced from the gear; basket and sword glyphs")
+    check(qb.items.on and qb.tasks.on and not qb.separate.on, "full ink = on")
+    qb.items:GetScript("OnClick")(qb.items)
+    check(not T.db.opts.tallyLoot and not ShownTexts():find("Small Spider Leg") and f:IsShown(), "items off: tasks only, and the tally stays up")
+    qb.tasks:GetScript("OnClick")(qb.tasks)
+    check(T.db.opts.tallyTasks, "the last of items / tasks can't be switched off")
+    qb.items:GetScript("OnClick")(qb.items)
+    f:SetSize(320, 420)                      -- room for both groups on the page
+    qb.separate:GetScript("OnClick")(qb.separate)
+    local heads = {}
+    for _, h in ipairs(f.kindHeads or {}) do if h.fs.__shown then heads[#heads + 1] = h.fs.__text end end
+    check(T.db.opts.tallySeparate and table.concat(heads, ",") == "Items,Tasks", "tasks apart: Items and Tasks headings (" .. table.concat(heads, ",") .. ")")
+    qb.separate:GetScript("OnClick")(qb.separate)
+    check(#(f.kindHeads or {}) == 0 or not f.kindHeads[1].fs.__shown, "headings go away with tasks together")
+    f:SetSize(T.db.frame.width, T.db.frame.height)
+
+    -- new looks: images, margins that follow the window, the fold
+    for _, key in ipairs({ "STONE", "BARK", "LEAF", "LEATHER", "ARCANE" }) do
+        SlashCmdList["CACHEREQUEST"]("look " .. ({ STONE = "slate", BARK = "bark", LEAF = "leaf", LEATHER = "leather", ARCANE = "arcane" })[key])
+        local st = P.GetStyle()
+        check(T.db.look == key and f.topSheet.body.__tex == st.image and FileExists(root .. "/textures/" .. st.image:match("([%w_]+)$") .. ".tga"),
+            key .. ": /crq look picks it, and its texture is in the addon")
+        local pl = P.GetPads(f)
+        check(pl == math.max(st.pad, math.floor(f:GetWidth() * st.inset[1] + 0.5)), key .. ": margins are a share of the window")
+    end
+    check(f.arcaneOn and f.arcane and f.arcane.ring.__shown and f.titleFS.halo and f.titleFS.halo[1].__shown, "arcane script: rune circle and glowing words")
+    f.corner:Show(); f.corner.drawnKey = nil; P.DrawCorner(f.corner)
+    check(not f.corner.under[1].__shown and f.corner.foldEdge.__shown, "arcane script: a drawn corner mark, nothing folds")
+    SlashCmdList["CACHEREQUEST"]("look leather")
+    f.corner:Show(); P.PlaceCorner(f); f.corner.drawnKey = nil; P.DrawCorner(f.corner)
+    local NF = P.CORNER_REST + (-f.corner.offX) + f.corner.offY
+    check(NF > P.CORNER_REST and f.corner.under[NF] and f.corner.under[NF].__shown and f.corner.crease[1].__shown
+        and not f.corner.foldEdge.__shown, "leather: the fold reaches the image's corner and follows the hide's edge")
+    SlashCmdList["CACHEREQUEST"]("look leaf")
+    f.corner:Show(); P.PlaceCorner(f); f.corner.drawnKey = nil; P.DrawCorner(f.corner)
+    check(f.corner.under[P.CORNER_REST].__shown and not f.corner.under[P.CORNER_REST + 1].__shown, "leaf: a dog-ear on the leaf's own corner")
+    check(P.INK[1] < 0.1, "leaf: near-black ink")
+    SlashCmdList["CACHEREQUEST"]("look rag")
+    Refresh("ZONE_CHANGED")
+    local row = RowFor("Small Spider Leg")
+    check(row and row.itemText.halo and row.itemText.halo[1].__shown and P.BLEED_W == 2.2, "rag: wet ink round the words and wide bleed")
+
+    -- Blotted scrawl: soaked-in blots from the atlas, a bolder hand, the heading's copies cut off with it
+    T.db.font = "BLOTTED"; Refresh("ZONE_CHANGED")
+    row = RowFor("Small Spider Leg")
+    local blots = 0
+    for _, d in ipairs(row and row.drops or {}) do
+        if d.__shown and d.__tex == P.INK_BLOTS_TEX and d.__tc and #d.__tc == 4 then blots = blots + 1 end
+    end
+    check(blots >= 2 and P.INK_BLOTS_TEX == "Interface\\AddOns\\CacheReQuest\\textures\\ink_blots", "blotted scrawl: spatters of ink from the blot atlas")
+    check(row.itemText.boldCopy and row.itemText.boldCopy.__shown and row.itemText.boldCopy.__points[1][4] == 0.8, "blotted scrawl: a bolder hand")
+    local tb = f.titleFS.boldCopy
+    check(f.titleFS.singleLine and tb and tb.__points[2] and tb.__points[2][1] == "TOPRIGHT", "the heading's copies cut off with it, never wrap under it")
+    T.db.font = "QUILL"
+
+    -- text size
+    T.db.textScale = 150; Refresh("ZONE_CHANGED")
+    row = RowFor("Small Spider Leg")
+    local _, sz = row.itemText:GetFont()
+    check(sz == math.floor(13 * 1.5 + 0.5), "text size 150%: bigger writing (" .. tostring(sz) .. ")")
+    T.db.textScale = 100; Refresh("ZONE_CHANGED")
+
+    -- every slider has a real range
+    local bad, nS = 0, 0
+    for _, fr in ipairs(allFrames) do
+        if fr.__kind == "Slider" then
+            nS = nS + 1
+            if type(fr.__min) ~= "number" or type(fr.__max) ~= "number" or fr.__max <= fr.__min then bad = bad + 1 end
+        end
+    end
+    check(nS >= 3 and bad == 0, "every slider has a min/max range (" .. nS .. " sliders, " .. bad .. " without)")
+
+    -- switching the tally on when "...only when something is nearby" keeps it away says why in chat
+    local said, realPrint = {}, print
+    T.db.opts.hideWhenNothingNearby = true
+    PX, PY = 0.02, 0.02; NOW = NOW + 1000
+    SlashCmdList["CACHEREQUEST"]("tally")
+    print = function(s) table.insert(said, tostring(s)) end
+    SlashCmdList["CACHEREQUEST"]("tally")
+    print = realPrint
+    check(not f:IsShown() and said[1] and said[1]:find("hidden until something is nearby", 1, true), "tally switched on but nothing nearby: chat says why")
+    T.db.opts.hideWhenNothingNearby = false; PX, PY = 0.55, 0.60
+    SlashCmdList["CACHEREQUEST"]("tally"); SlashCmdList["CACHEREQUEST"]("tally")
+
+    -- saved: text size clamped, never an empty tally
+    QRF_SavedState.fieldTally = { textScale = 400, opts = { tallyLoot = false, tallyTasks = false } }
+    Fire("ADDON_LOADED", "CacheReQuest")
+    check(T.db.textScale == 150 and T.db.opts.tallyLoot == true, "saved text size clamped; items come back if both were off")
+    T.db.textScale = 100
+    Refresh("ZONE_CHANGED")
+end)()
 -- 24) Ticker keeps it current and nothing errored
 check(type(TICKER) == "function", "proximity ticker running")
 TICKER()
+;(function()  -- (own function: the test file is near Lua's 200-locals limit) tracker stacks: a quest with an item to click (an eye, a phial...) still stacks; its item gets our own
+    -- secure button left of the deck, gliding beside its own card as the deck fans out
+    local C = ns.CRQ
+    local IB = C.ItemBtns
+    local ICON = "Interface\\Icons\\INV_Drink_06"
+    local function Count() local n = 0; for _ in pairs(C.GetTrackerClusters()) do n = n + 1 end; return n end
+    local function Entries()
+        return {
+            { questID = 103, isComplete = true, mapID = 57, x = 0.58, y = 0.62, logIdx = 4, frame = CreateFrame("Frame") },
+            { questID = 101, isComplete = true, mapID = 57, x = 0.56, y = 0.61, logIdx = 2, frame = CreateFrame("Frame") },
+        }
+    end
+    local e = Entries()
+    C.BuildTrackerClustersForBlocks(e)
+    check(Count() == 1 and e[1].clusterID and e[1].clusterID == e[2].clusterID, "two ready quests close together share a (?) deck")
+    -- the block shows an item button but the game gives no item to put on ours: it keeps its own line
+    e = Entries()
+    e[1].frame.itemButton = CreateFrame("Button", nil, e[1].frame); e[1].frame.itemButton:Show()
+    C.BuildTrackerClustersForBlocks(e)
+    check(e[1].hasQuestItem and not e[1].clusterID and Count() == 0, "an item button we can't copy: the quest keeps its own line")
+    -- the game names the item: the quest stacks and the deck carries the item
+    local real = GetQuestLogSpecialItemInfo
+    GetQuestLogSpecialItemInfo = function(i) if i == 4 then return "item:5185", ICON, 1, false end end
+    e = Entries(); C.BuildTrackerClustersForBlocks(e)
+    check(not e[1].hasQuestItem and Count() == 1, "a finished quest whose item button goes away stacks as usual")
+    GetQuestLogSpecialItemInfo = function(i) if i == 4 then return "item:5185", ICON, 1, true end end
+    e = Entries(); C.BuildTrackerClustersForBlocks(e)
+    check(e[1].hasQuestItem and e[1].questItem and e[1].questItem.link == "item:5185" and Count() == 1,
+        "a quest with an item still stacks; the deck knows its item")
+    -- the button: left of the collapsed deck, beside its own card when fanned out
+    local pool = C.GetDeckPool()
+    local deck = CreateFrame("Frame")
+    deck.cards = { CreateFrame("Button"), CreateFrame("Button") }
+    deck.clusterData = { quests = e }
+    deck.numActiveCards = 2
+    deck.expandProgress = 0
+    deck:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 20, -30)
+    deck:Show()
+    table.insert(pool, deck)
+    IB.Place()
+    local b = IB.pool[1]
+    check(b and b.__shown and b:GetAttribute("type") == "item" and b:GetAttribute("item") == "item:5185" and b.icon.__tex == ICON
+        and b.questID == 103, "its item gets a secure item button (type item, the quest's item)")
+    local pt = b.__points[1]
+    check(pt[1] == "TOPRIGHT" and pt[2] == UIParent and pt[4] == deck:GetLeft() - 4 and pt[5] == deck:GetTop() - 4,
+        "collapsed: the button sits left of the deck, level with its top (placed on screen, not anchored to the deck)")
+    check(not (IB.pool[2] and IB.pool[2].__shown), "only quests with items get a button")
+    local card = deck.cards[1]
+    card:SetPoint("TOPLEFT", deck, "TOPLEFT", 0, -60); card:Show()
+    deck.expandProgress = 1
+    IB.Place()
+    pt = b.__points[1]
+    check(pt[4] == card:GetLeft() - 4 and pt[5] == card:GetTop() - 4, "fanned out: the button sits beside its own card")
+    -- in combat it can't move: it stays put and catches up after
+    local realCombat = InCombatLockdown
+    InCombatLockdown = function() return true end
+    deck.expandProgress = 0
+    IB.Place()
+    check(b.__points[1][5] == card:GetTop() - 4 and IB.dirty, "in combat the button stays where it was")
+    InCombatLockdown = realCombat
+    Fire("PLAYER_REGEN_ENABLED")
+    check(b.__points[1][5] == deck:GetTop() - 4 and not IB.dirty, "after combat it catches up with the deck")
+    -- deck gone: button gone
+    deck:Hide(); IB.Place()
+    check(not b.__shown, "no deck, no button")
+    table.remove(pool)
+    -- a client without secure buttons: the quest keeps its own tracker line (and Blizzard's button)
+    IB.ok = false
+    e = Entries(); C.BuildTrackerClustersForBlocks(e)
+    check(e[1].hasQuestItem and not e[1].clusterID and Count() == 0, "no secure buttons: a quest with an item stays out of decks")
+    IB.ok = true
+    e = Entries(); e[1].isComplete = false; e[2].isComplete = false
+    check(C.QuestBlockHasItemButton(e[1]) and not C.QuestBlockHasItemButton(e[2]), "an unfinished quest with an item always has its button")
+    GetQuestLogSpecialItemInfo = real
+end)()
 check(#ERRORS == 0, "no Lua errors reported (" .. #ERRORS .. ")")
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

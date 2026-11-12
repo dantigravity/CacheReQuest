@@ -12,8 +12,9 @@
 --   CRQ_TallyKnowledge         (account-wide)   where items were looted and which mobs dropped them
 -- The handkerchief, parchment and transparent looks are drawn with colour textures, gradients,
 -- lines and vertex offsets. Crumpled paper, torn rag, chalked slate, carved bark, pipe-weed leaf,
--- etched leather and arcane script use the images in textures\ (all procedural, made by
--- Handkerquest's tools\TexGen.cs), as do Blotted scrawl's ink drops (ink_blots).
+-- etched leather, sanctified marble, gilded plate, illuminated vellum and arcane script use the
+-- images in textures\ (all procedural, made by Handkerquest's tools\TexGen.cs), as do Blotted
+-- scrawl's ink drops (ink_blots).
 -- ============================================================================
 local ADDON_NAME, ns = ...
 ns = (type(ns) == "table") and ns or {}
@@ -59,9 +60,12 @@ ns.Tally = T
 
 T.DEFAULTS = {
     show = true,                    -- the Field Tally is shown
-    look = "RAG",                   -- "RAG" (torn rag), "CRUMPLED", "STONE", "BARK", "LEAF", "LEATHER", "ARCANE",
-                                    -- "HANDKERCHIEF", "PARCHMENT" or "NATIVE" (transparent window)
+    look = "RAG",                   -- "RAG" (torn rag), "CRUMPLED", "STONE", "BARK", "LEAF", "LEATHER", "MARBLE",
+                                    -- "GILDED", "VELLUM", "ARCANE", "HANDKERCHIEF", "PARCHMENT" or "NATIVE"
+                                    -- (transparent window)
     font = "QUILL",                 -- handwriting: "QUILL", "SCRAWL", "PLAIN" or "BLOTTED"
+    inkColors = {},                 -- [look key] = { r, g, b } writing colour chosen for that look (missing = its own)
+    runeColor = nil,                -- Arcane script: { r, g, b } of the rune circle & its light (nil = the look's violet)
     nearRadius = 10,                -- "Near me": how close (% of the zone map) the items must be
     pageRadius = 16,                -- cluster size (% of the zone map)
     grouping = "AREA",              -- other pages by "AREA" (map areas), "ZONE" or "RADIUS" (clusters)
@@ -90,7 +94,8 @@ T.DEFAULTS = {
 function T.CopyDefaults()
     local d = T.DEFAULTS
     local db = { show = d.show, look = d.look, font = d.font, nearRadius = d.nearRadius,
-        pageRadius = d.pageRadius, grouping = d.grouping, textScale = d.textScale, opts = {}, frame = {}, questAreas = {} }
+        pageRadius = d.pageRadius, grouping = d.grouping, textScale = d.textScale, opts = {}, frame = {}, questAreas = {},
+        inkColors = {}, runeColor = nil }
     for k, v in pairs(d.opts) do db.opts[k] = v end
     for k, v in pairs(d.frame) do db.frame[k] = v end
     return db
@@ -101,6 +106,17 @@ T.K = { version = 1, spots = {}, droppers = {}, owners = {}, kept = {} }
 local function ValidKey(list, key)
     for _, e in ipairs(list) do if e.key == key then return true end end
     return false
+end
+
+-- A saved { r, g, b } (each 0-1), or nil if it's missing or broken
+function T.ValidColor(c)
+    if type(c) ~= "table" then return nil end
+    local out = {}
+    for k = 1, 3 do
+        if type(c[k]) ~= "number" or c[k] ~= c[k] then return nil end
+        out[k] = math.max(0, math.min(1, c[k]))
+    end
+    return out
 end
 
 -- Reads the saved settings over the defaults, keeping only values of the right type and range
@@ -115,6 +131,12 @@ function T.LoadSaved()
         if type(sv.nearRadius) == "number" then db.nearRadius = math.max(1, math.min(50, math.floor(sv.nearRadius + 0.5))) end
         if type(sv.pageRadius) == "number" then db.pageRadius = math.max(1, math.min(50, math.floor(sv.pageRadius + 0.5))) end
         if type(sv.textScale) == "number" then db.textScale = math.max(80, math.min(150, math.floor(sv.textScale + 0.5))) end
+        db.runeColor = T.ValidColor(sv.runeColor)
+        if type(sv.inkColors) == "table" then
+            for k, c in pairs(sv.inkColors) do
+                if ValidKey(T.P.STYLES, k) then db.inkColors[k] = T.ValidColor(c) end
+            end
+        end
         if type(sv.opts) == "table" then
             for k in pairs(db.opts) do
                 if type(sv.opts[k]) == "boolean" then db.opts[k] = sv.opts[k] end
@@ -1179,8 +1201,11 @@ end
 
 -- ----------------------------------------------------------------------------
 -- LOOKS: handkerchief notes, the parchment pile, crumpled paper, a torn rag (default), chalked slate,
--- carved bark, a pipe-weed leaf, etched leather, arcane script (glowing mage writing in the air), or a
--- see-through WoW window. Every colour the tally draws with comes from here.
+-- carved bark, a pipe-weed leaf, etched leather, sanctified marble, gilded plate, illuminated vellum,
+-- arcane script (glowing mage writing in the air), or a see-through WoW window. Every colour the tally
+-- draws with comes from here (the writing and rune colours chosen in the options are laid over these by
+-- P.ApplyTallyColors). flips = which way each page underneath is turned; sheen = a band of light that
+-- sweeps across the material now and then; initial = the heading's first letter in its own colour.
 -- Texture looks are images in textures\ (512x512 unless noted, 32-bit uncompressed TGA; the alpha
 -- channel is the shape; made by Handkerquest's tools\TexGen.cs). image = the file, imageCorner =
 -- where its bottom-right corner sits (fraction of width, height) so the page-turn corner folds the
@@ -1305,7 +1330,7 @@ P.STYLES = {
         imageCorner = { 0.15, 0.15 },          -- where the corner mark sits on the stone's face
         shadowAlpha = 0.45, pile = true,
         inkShadow = { 0.92, 0.91, 0.87, 0.22, 1, 0 },   -- r, g, b, opacity, x, y offset: chalk dust
-        bleed = { 0.92, 0.91, 0.87, 0.30 },              -- the dust around chalked lines
+        bleed = { 0.92, 0.91, 0.87, 0.30 }, bleedFollowsInk = true,   -- the dust around chalked lines (chalk: takes the writing colour)
         ink = { 0.93, 0.92, 0.88 }, inkRed = { 0.95, 0.62, 0.50 }, inkGreen = { 0.62, 0.86, 0.58 },
         title = { 0.96, 0.95, 0.91 }, faded = { 0.62, 0.62, 0.60 }, footer = { 0.80, 0.80, 0.76 },
         sub = { 0.75, 0.75, 0.72 }, close = { 0.85, 0.85, 0.82 }, gear = { 0.85, 0.85, 0.82 },
@@ -1395,6 +1420,82 @@ P.STYLES = {
                    shadow = { 0.10, 0.06, 0.02 } },
     },
     {
+        -- a paladin's tablet: white marble with an arched top, a gold-inlaid groove inside the edge; the
+        -- letters are cut and gilded (a dark shadow in the top-left wall of each cut) and a soft holy light
+        -- breathes round them. Stone doesn't bend: a gilded dog-ear mark (rigid). The tablets underneath
+        -- are only mirrored, so their arches stay on top.
+        key = "MARBLE", label = "Sanctified marble",
+        image = P.TEXTURE_DIR .. "sanctified_marble",
+        paper = { 1, 1, 1, 1 }, depth = 1, rigid = true,
+        back = { { 0.90, 0.89, 0.87, 1 }, { 0.80, 0.79, 0.77, 1 }, { 0.70, 0.69, 0.67, 1 } },
+        flips = { 1, 0, 1 },
+        imageCorner = { 0.17, 0.15 },          -- inside the gold groove
+        shadowAlpha = 0.40, pile = true,
+        inkShadow = { 0.30, 0.24, 0.14, 0.55, -1, 1 },
+        bleed = { 0.36, 0.28, 0.16, 0.30 },
+        ink = { 0.66, 0.48, 0.12 }, inkRed = { 0.64, 0.16, 0.10 }, inkGreen = { 0.22, 0.44, 0.20 },
+        title = { 0.58, 0.40, 0.08 }, faded = { 0.60, 0.56, 0.48 }, footer = { 0.52, 0.42, 0.22 },
+        sub = { 0.55, 0.45, 0.28 }, close = { 0.50, 0.40, 0.20 }, gear = { 0.50, 0.40, 0.20 },
+        reward = { 0.20, 0.34, 0.48 }, rewardGold = { 0.56, 0.36, 0.04 },
+        wash = { 0.85, 0.70, 0.30, 0.06 }, washFlash = { 1.00, 0.85, 0.40, 0.45 },
+        divider = { 0.60, 0.48, 0.25, 0.18 }, highlight = { 1.00, 0.85, 0.40, 0.10 },
+        grip = { 0.55, 0.45, 0.25, 0.85 }, pad = 8,
+        inset = { 0.16, 0.24, 0.16, 0.13 },    -- inside the groove, below the arch's narrow top
+        halo = { color = { 1.00, 0.86, 0.45 }, alpha = 0.40, radius = 1.4, pulse = true, pulseSpeed = 1.2 },   -- holy light
+        corner = { u1 = { 0.70, 0.69, 0.66 }, u2 = { 0.85, 0.84, 0.81 }, tip = { 0.70, 0.52, 0.14 },
+                   crease = { 0.70, 0.52, 0.14 }, edge = { 0.70, 0.52, 0.14, 0.95 }, cut = { 0.70, 0.52, 0.14, 0.95 },
+                   shadow = { 0.30, 0.24, 0.14 } },
+    },
+    {
+        -- a plate of beaten gold: hammer dents, a raised rolled rim, a rivet in each corner. The list is
+        -- engraved (dark lines, a bright lower wall: inkShadow) and a band of light sweeps across the
+        -- metal now and then (style.sheen). Rigid: an engraved dog-ear mark.
+        key = "GILDED", label = "Gilded plate",
+        image = P.TEXTURE_DIR .. "gilded_plate",
+        paper = { 1, 1, 1, 1 }, depth = 1, rigid = true,
+        back = { { 0.88, 0.86, 0.82, 1 }, { 0.78, 0.76, 0.72, 1 }, { 0.68, 0.66, 0.62, 1 } },
+        imageCorner = { 0.16, 0.16 },          -- on the face, inside the rivet
+        shadowAlpha = 0.45, pile = true,
+        inkShadow = { 1.00, 0.93, 0.62, 0.50, 1, -1 },
+        bleed = { 0.30, 0.18, 0.04, 0.40 },
+        ink = { 0.24, 0.14, 0.03 }, inkRed = { 0.50, 0.08, 0.04 }, inkGreen = { 0.12, 0.28, 0.08 },
+        title = { 0.20, 0.11, 0.02 }, faded = { 0.50, 0.36, 0.12 }, footer = { 0.30, 0.18, 0.05 },
+        sub = { 0.36, 0.23, 0.07 }, close = { 0.30, 0.18, 0.05 }, gear = { 0.30, 0.18, 0.05 },
+        reward = { 0.10, 0.20, 0.30 }, rewardGold = { 0.40, 0.22, 0.02 },
+        wash = { 0.40, 0.25, 0.05, 0.08 }, washFlash = { 1.00, 0.95, 0.70, 0.45 },
+        divider = { 0.35, 0.22, 0.05, 0.18 }, highlight = { 1.00, 0.95, 0.70, 0.12 },
+        grip = { 0.30, 0.18, 0.05, 0.85 }, pad = 8,
+        inset = { 0.13, 0.12, 0.13, 0.12 },    -- inside the rim
+        sheen = { color = { 1.00, 0.96, 0.80 }, alpha = 0.35, width = 0.22, sweep = 1.6, every = 7 },
+        corner = { u1 = { 0.55, 0.40, 0.12 }, u2 = { 0.80, 0.62, 0.25 }, tip = { 0.24, 0.14, 0.03 },
+                   crease = { 0.24, 0.14, 0.03 }, edge = { 0.24, 0.14, 0.03, 0.95 }, cut = { 0.24, 0.14, 0.03, 0.95 },
+                   shadow = { 1.00, 0.93, 0.62 } },
+    },
+    {
+        -- a leaf of a holy book: cream vellum, a gold-leaf border between a blue and a red rule, gold bosses
+        -- in the corners. Black iron-gall writing; the heading in red (a rubric) with its first letter gilded
+        -- (style.initial); "(turn in)" in the border's blue. It bends: a real fold.
+        key = "VELLUM", label = "Illuminated vellum",
+        image = P.TEXTURE_DIR .. "illuminated_vellum",
+        paper = { 1, 1, 1, 1 }, depth = 1,
+        back = { { 0.95, 0.93, 0.88, 1 }, { 0.89, 0.86, 0.80, 1 }, { 0.83, 0.80, 0.73, 1 } },
+        imageCorner = { 0.052, 0.052 },        -- the page's own corner
+        shadowAlpha = 0.32, pile = true,
+        ink = { 0.10, 0.08, 0.07 }, inkRed = { 0.66, 0.10, 0.06 }, inkGreen = { 0.18, 0.26, 0.60 },
+        title = { 0.62, 0.10, 0.06 }, initial = { 0.80, 0.58, 0.12 },
+        faded = { 0.50, 0.45, 0.38 }, footer = { 0.40, 0.33, 0.25 },
+        sub = { 0.48, 0.40, 0.30 }, close = { 0.35, 0.28, 0.20 }, gear = { 0.35, 0.28, 0.20 },
+        reward = { 0.18, 0.26, 0.60 }, rewardGold = { 0.70, 0.48, 0.08 },   -- the border's blue; gilding
+        wash = { 0.45, 0.38, 0.25, 0.05 }, washFlash = { 0.95, 0.75, 0.25, 0.45 },
+        divider = { 0.62, 0.10, 0.06, 0.18 }, highlight = { 0.45, 0.35, 0.15, 0.07 },
+        grip = { 0.50, 0.40, 0.28, 0.85 }, pad = 8,
+        inset = { 0.12, 0.11, 0.12, 0.11 },    -- inside the red rule
+        halo = { alpha = 0.10, radius = 0.6 }, bleedWidth = 1.4, bleedAlpha = 0.22,   -- iron-gall barely bites into skin
+        corner = { u1 = { 0.70, 0.66, 0.56 }, u2 = { 0.90, 0.87, 0.78 }, tip = { 0.97, 0.94, 0.86 },
+                   crease = { 0.80, 0.76, 0.66 }, edge = { 0.55, 0.48, 0.36, 0.70 }, cut = { 0.65, 0.58, 0.45, 0.60 },
+                   shadow = { 0.10, 0.08, 0.05 } },
+    },
+    {
         -- a mage's writing hanging in the air: words of violet-white light over a faint haze (256px), a rune
         -- circle turning slowly behind them (arcane.ring, added light) and motes drifting up. Nothing to fold,
         -- so the page corner is a glowing mark (rigid), and there's no pile: the footer says which page.
@@ -1405,7 +1506,9 @@ P.STYLES = {
         imageCorner = { 0.06, 0.08 },
         shadowAlpha = 0, pile = false,
         arcane = { ring = P.TEXTURE_DIR .. "arcane_ring", ringColor = { 0.62, 0.40, 1.00 },
-                   ringAlpha = 0.30, spin = 0.06, motes = 10 },
+                   ringAlpha = 0.30, spin = 0.06, motes = 10,
+                   moteColors = { { 0.55, 0.90, 1.00 }, { 0.75, 0.50, 1.00 } } },   -- 40% / 60% of the motes
+        -- rune & writing colours can be changed in the options (P.ApplyTallyColors rewrites this entry)
         halo = { color = { 0.60, 0.35, 1.00 }, alpha = 0.45, radius = 1.2, pulse = true },
         bleed = { 0.62, 0.38, 1.00, 0.55 }, bleedWidth = 2.6,
         ink = { 0.90, 0.86, 1.00 }, inkRed = { 0.55, 0.90, 1.00 }, inkGreen = { 0.60, 1.00, 0.78 },
@@ -1449,6 +1552,159 @@ function P.GetStyle()
     return P.STYLES[1]
 end
 
+-- ----------------------------------------------------------------------------
+-- TALLY COLOURS (options panel)
+--  * Rune colour (Arcane script only, beside the Look button): the rune circle and its light (glow round
+--    the words, motes, ticks & strikes, corner mark) = T.db.runeColor.
+--  * Writing colour (every look): T.db.inkColors[look key]; each look remembers its own. The heading,
+--    faded lines, footer and buttons keep the look's own shading relative to its ink. Wet ink (no
+--    style.bleed) bleeds in the writing colour anyway; the slate's chalk dust follows it (bleedFollowsInk);
+--    bark's carved shadow and leather's pressed lip are the material's and stay (arcane: the runes').
+--    Reward amounts keep the look's own colours.
+-- nil = the look's own colours (the first swatch). Custom... = WoW's colour picker.
+-- ----------------------------------------------------------------------------
+P.ARCANE_RUNE_COLORS = {
+    { label = "Violet",     c = { 0.62, 0.40, 1.00 } },
+    { label = "Frost blue", c = { 0.30, 0.68, 1.00 } },
+    { label = "Fel green",  c = { 0.35, 1.00, 0.30 } },
+    { label = "Fire",       c = { 1.00, 0.48, 0.12 } },
+    { label = "Gold",       c = { 1.00, 0.80, 0.22 } },
+    { label = "Crimson",    c = { 1.00, 0.20, 0.25 } },
+    { label = "Rose",       c = { 1.00, 0.42, 0.80 } },
+    { label = "Silver",     c = { 0.82, 0.86, 0.95 } },
+}
+-- the first swatch is the current look's own ink (filled in by the options panel)
+P.INK_COLORS = {
+    { label = "The look's own", own = true },
+    { label = "Soot black",  c = { 0.08, 0.07, 0.06 } },
+    { label = "Sepia",       c = { 0.38, 0.22, 0.10 } },
+    { label = "Indigo",      c = { 0.14, 0.20, 0.50 } },
+    { label = "Forest green", c = { 0.10, 0.34, 0.16 } },
+    { label = "Oxblood red", c = { 0.55, 0.10, 0.08 } },
+    { label = "Gold",        c = { 0.96, 0.80, 0.34 } },
+    { label = "Ice",         c = { 0.78, 0.92, 1.00 } },
+    { label = "White",       c = { 1.00, 1.00, 1.00 } },
+}
+P.ARCANE_RUNE_FIELDS = { "bleed", "wash", "washFlash", "divider", "highlight", "corner" }
+P.INK_FIELDS = { "ink", "title", "faded", "footer", "sub", "close", "gear", "grip", "name" }
+
+function P.CopyTable(t)
+    if type(t) ~= "table" then return t end
+    local o = {}
+    for k, v in pairs(t) do o[k] = P.CopyTable(v) end
+    return o
+end
+
+function P.MixColor(c, to, t, a)
+    local out = {}
+    for k = 1, 3 do out[k] = c[k] + ((to and to[k] or 1) - c[k]) * t end
+    out[4] = a
+    return out
+end
+
+function P.ScaleColor(c, s, a)
+    return { c[1] * s, c[2] * s, c[3] * s, a }
+end
+
+function P.SameColor(a, b)
+    if not (a and b) then return a == b end
+    for k = 1, 3 do if math.abs((a[k] or 0) - (b[k] or 0)) > 0.01 then return false end end
+    return true
+end
+
+-- Each look's own colours, kept for "back to the first swatch" (taken once, before any change)
+function P.StyleDefaults(st)
+    P.STYLE_DEFAULTS = P.STYLE_DEFAULTS or {}
+    local d = P.STYLE_DEFAULTS[st.key]
+    if not d then
+        d = {}
+        for _, k in ipairs(P.INK_FIELDS) do d[k] = P.CopyTable(st[k]) end
+        for _, k in ipairs(P.ARCANE_RUNE_FIELDS) do d[k] = P.CopyTable(st[k]) end
+        if st.arcane then
+            d.ringColor, d.moteColors = P.CopyTable(st.arcane.ringColor), P.CopyTable(st.arcane.moteColors)
+            d.haloColor = P.CopyTable(st.halo and st.halo.color)
+        end
+        P.STYLE_DEFAULTS[st.key] = d
+    end
+    return d
+end
+
+-- A field moved by the same step the ink moved (keeps the look's own lighter/fainter shading), alpha kept
+function P.ShiftColor(c, from, to)
+    local out = {}
+    for k = 1, 3 do out[k] = math.max(0, math.min(1, c[k] + (to[k] - from[k]))) end
+    out[4] = c[4]
+    return out
+end
+
+-- Rewrites the looks in P.STYLES from the chosen colours (P.ApplyStyle runs this first)
+function P.ApplyTallyColors()
+    for _, st in ipairs(P.STYLES) do
+        local d = P.StyleDefaults(st)
+        -- runes (arcane only)
+        if st.arcane then
+            local c = T.ValidColor(T.db.runeColor)
+            if c and P.SameColor(c, d.ringColor) then c = nil end
+            if not c then
+                st.arcane.ringColor, st.arcane.moteColors = P.CopyTable(d.ringColor), P.CopyTable(d.moteColors)
+                if st.halo then st.halo.color = P.CopyTable(d.haloColor) end
+                for _, k in ipairs(P.ARCANE_RUNE_FIELDS) do st[k] = P.CopyTable(d[k]) end
+            else
+                st.arcane.ringColor = c
+                st.arcane.moteColors = { P.MixColor(c, nil, 0.45), P.MixColor(c, nil, 0.15) }
+                if st.halo then st.halo.color = { c[1], c[2], c[3] } end
+                st.bleed = { c[1], c[2], c[3], 0.55 }
+                st.wash = { c[1], c[2], c[3], 0.10 }
+                st.washFlash = P.MixColor(c, nil, 0.40, 0.40)
+                st.divider = P.MixColor(c, nil, 0.20, 0.14)
+                st.highlight = { c[1], c[2], c[3], 0.12 }
+                st.corner = { u1 = P.ScaleColor(c, 0.32), u2 = P.ScaleColor(c, 0.65), tip = P.MixColor(c, nil, 0.50),
+                    crease = P.MixColor(c, nil, 0.25), edge = P.MixColor(c, nil, 0.35, 0.90), cut = P.MixColor(c, nil, 0.35, 0.90),
+                    shadow = { c[1], c[2], c[3] } }
+            end
+        end
+        -- writing (every look)
+        local w = T.ValidColor(T.db.inkColors and T.db.inkColors[st.key])
+        if w and P.SameColor(w, d.ink) then w = nil end
+        for _, k in ipairs(P.INK_FIELDS) do
+            if d[k] then st[k] = w and P.ShiftColor(d[k], d.ink, w) or P.CopyTable(d[k]) end
+        end
+        if w then st.ink = { w[1], w[2], w[3] } end
+        if not st.arcane and d.bleed then
+            st.bleed = (w and st.bleedFollowsInk) and P.ShiftColor(d.bleed, d.ink, w) or P.CopyTable(d.bleed)
+        end
+    end
+end
+
+-- Options: the rune colour, or the current look's writing colour; nil = the look's own
+function P.SetTallyColor(which, c)
+    c = T.ValidColor(c)
+    if which == "rune" then
+        T.db.runeColor = c
+    else
+        T.db.inkColors = T.db.inkColors or {}
+        T.db.inkColors[P.GetStyle().key] = c
+    end
+    T.Save()
+    P.ApplyStyle()
+    T.SafeCall(T.Update)
+end
+
+function P.GetTallyColor(which)
+    local st = P.GetStyle()
+    if which == "rune" then
+        local d = P.STYLE_DEFAULTS and P.STYLE_DEFAULTS.ARCANE
+        return T.db.runeColor or (d and d.ringColor) or P.ARCANE_RUNE_COLORS[1].c
+    end
+    return (T.db.inkColors and T.db.inkColors[st.key]) or P.StyleDefaults(st).ink
+end
+
+-- What's stored (nil = the look's own), to put back when the colour picker is cancelled
+function P.GetStoredTallyColor(which)
+    if which == "rune" then return T.db.runeColor end
+    return T.db.inkColors and T.db.inkColors[P.GetStyle().key]
+end
+
 function P.CycleStyle()
     local idx = 1
     for i, st in ipairs(P.STYLES) do
@@ -1486,6 +1742,7 @@ end
 
 -- Repaints the whole pile and its chrome for the current look
 function P.ApplyStyle(f)
+    P.ApplyTallyColors()
     f = f or T.frame
     if not f then return end
     local st = P.GetStyle()
@@ -1504,7 +1761,7 @@ function P.ApplyStyle(f)
             cloth = cl and { radius = cl.radius, scallop = cl.scallop, step = cl.step, ripple = cl.ripple,
                 lace = { math.min(1, bp[1] * 1.03), math.min(1, bp[2] * 1.03), math.min(1, bp[3] * 1.03), bp[4] },
                 thread = st.backThread } or nil,
-            image = st.image, flip = st.fan and st.fan.flips[k] or k })   -- each page underneath turned a different way
+            image = st.image, flip = st.fan and st.fan.flips[k] or (st.flips and st.flips[k]) or k })   -- each page underneath turned a different way
     end
     P.RestyleSheet(f.topSheet, {
         paper = st.paper, rim = st.rim, depth = st.depth, minDepth = st.minDepth, segW = st.segW,
@@ -1525,6 +1782,7 @@ function P.ApplyStyle(f)
     P.LayoutPads(f)
     P.LayoutInkGrain(f)
     P.LayoutArcane(f)
+    P.LayoutSheen(f)
     if f.corner then f.corner.drawnKey = nil; P.DrawCorner(f.corner) end
     P.ApplyStackLayout(f)
 end
@@ -1617,25 +1875,83 @@ function P.AnimateArcane(f, now)
             m:SetPoint("CENTER", f.chrome, "BOTTOMLEFT", x, h * (0.10 + 0.85 * p))
             m:SetSize(s, s)
             local a = math.sin(math.pi * p) * 0.85
-            if P.Hash01(k, cyc, 14) > 0.6 then m:SetVertexColor(0.55, 0.90, 1.00, a) else m:SetVertexColor(0.75, 0.50, 1.00, a) end
+            local mc = ac.moteColors or { { 0.55, 0.90, 1.00 }, { 0.75, 0.50, 1.00 } }
+            mc = (P.Hash01(k, cyc, 14) > 0.6) and mc[1] or mc[2]
+            m:SetVertexColor(mc[1], mc[2], mc[3], a)
             m:Show()
         end
     end
-    -- the words breathe
+    P.PulseHalo(f, now)
+end
+
+-- A glow that breathes (style.halo.pulse: arcane light, the marble's holy light): its copies of the words
+-- fade in and out together
+function P.PulseHalo(f, now)
     local hl = P.GetStyle().halo
-    if hl and hl.pulse then
-        local k = 0.75 + 0.25 * math.sin(now * 2.1)
-        local function Pulse(fs)
-            if not fs or not fs.halo then return end
-            for _, cp in ipairs(fs.halo) do
-                if cp:IsShown() and cp.haloCol then cp:SetTextColor(cp.haloCol[1], cp.haloCol[2], cp.haloCol[3], (hl.alpha or 0.4) * k) end
-            end
-        end
-        Pulse(f.titleFS)
-        for _, row in ipairs(T.rowPool) do
-            if row:IsShown() then Pulse(row.itemText) end
+    if not (hl and hl.pulse) then return end
+    local k = 0.75 + 0.25 * math.sin(now * (hl.pulseSpeed or 2.1))
+    local function Pulse(fs)
+        if not fs or not fs.halo then return end
+        for _, cp in ipairs(fs.halo) do
+            if cp:IsShown() and cp.haloCol then cp:SetTextColor(cp.haloCol[1], cp.haloCol[2], cp.haloCol[3], (hl.alpha or 0.4) * k) end
         end
     end
+    Pulse(f.titleFS)
+    for _, row in ipairs(T.rowPool) do
+        if row:IsShown() then Pulse(row.itemText) end
+    end
+end
+
+-- Gilded plate (style.sheen): a band of light sweeps across the metal now and then. Two gradient halves
+-- (rising, falling), added light on the top page behind the words, kept inside the plate's face
+-- (style.inset) so it never spills past the rim.
+function P.LayoutSheen(f)
+    if not f or not f.topSheet then return end
+    local sh = P.GetStyle().sheen
+    if not sh then
+        if f.sheen then f.sheen.a:Hide(); f.sheen.b:Hide() end
+        f.sheenOn = false
+        return
+    end
+    if not f.sheen then
+        local S = {}
+        for _, k in ipairs({ "a", "b" }) do
+            S[k] = f.topSheet:CreateTexture(nil, "BACKGROUND", nil, 7)
+            if S[k].SetBlendMode then S[k]:SetBlendMode("ADD") end
+            S[k]:Hide()
+        end
+        f.sheen = S
+    end
+    local c = sh.color
+    ApplyHorizontalGradient(f.sheen.a, c[1], c[2], c[3], 0, 1)
+    ApplyHorizontalGradient(f.sheen.b, c[1], c[2], c[3], 1, 0)
+    f.sheenOn = true
+end
+
+function P.AnimateSheen(f, now)
+    local st = P.GetStyle()
+    local sh, S = st.sheen, f.sheen
+    if not (sh and S) then return end
+    local w, h = f:GetWidth() or 230, f:GetHeight() or 175
+    local ins = st.inset or { 0, 0, 0, 0 }
+    local left, right = w * ins[1], w * (1 - ins[3])
+    local top, bottom = h * ins[2], h * (1 - ins[4])
+    local p = (now % (sh.every or 7)) / (sh.sweep or 1.6)            -- 0..1 while the light passes
+    if p >= 1 or right - left < 10 then S.a:Hide(); S.b:Hide(); return end
+    local bw = w * (sh.width or 0.22)
+    local xc = left - bw / 2 + p * (right - left + bw)
+    local alpha = (sh.alpha or 0.3) * math.sin(math.pi * p)
+    local function Half(tex, x0, x1)
+        x0, x1 = math.max(x0, left), math.min(x1, right)
+        if x1 - x0 < 1 then tex:Hide(); return end
+        tex:ClearAllPoints()
+        tex:SetPoint("TOPLEFT", f.topSheet, "TOPLEFT", x0, -top)
+        tex:SetSize(x1 - x0, bottom - top)
+        tex:SetAlpha(alpha)
+        tex:Show()
+    end
+    Half(S.a, xc - bw / 2, xc)
+    Half(S.b, xc, xc + bw / 2)
 end
 
 -- Space between the window's edge and the writing on each side (left, top, right, bottom).
@@ -2121,7 +2437,12 @@ function P.OnUpdate(f, elapsed)
     end
 
     if next(P.fxRows) then P.AnimateRowFX(GetTime()) end
-    if f.arcaneOn then P.AnimateArcane(f, GetTime()) end
+    if f.arcaneOn then
+        P.AnimateArcane(f, GetTime())
+    elseif P.HALO and P.HALO.pulse then
+        P.PulseHalo(f, GetTime())
+    end
+    if f.sheenOn then P.AnimateSheen(f, GetTime()) end
 
     local c = f.corner
     if c and c:IsShown() then
@@ -3436,6 +3757,10 @@ function P.Render(f)
     P.SetInkFont(f.titleFS, "title")
     P.SetInkFont(f.footerFS, "small")
     local title = area.title or (area.isCurrent and "Field Tally" or "Elsewhere")
+    if st.initial then                       -- illuminated: the heading's first letter in gold (style.initial)
+        local first, rest = string.match(title, "^([%z\1-\127\194-\244][\128-\191]*)(.*)$")   -- one UTF-8 letter
+        if first then title = "|c" .. P.Hex(st.initial) .. first .. "|r" .. rest end
+    end
     if area.isCurrent and now < (P.currentGlowUntil or 0) then
         f.titleFS:SetTextColor(P.INK_RED[1], P.INK_RED[2], P.INK_RED[3], 1)
     else
@@ -4994,13 +5319,118 @@ function T.BuildOptionsPanel()
     local hideRefresh = hideCb.Refresh
     hideCb.Refresh = function(self) hideRefresh(self); self:SetAlpha(T.db.show and 1 or 0.45) end
 
+    -- Colour swatches (+ Custom... = WoW's colour picker). which = "rune" (Arcane script's rune circle,
+    -- beside the Look button, only while that look is chosen) or "ink" (the writing, every look; each
+    -- look remembers its own). The first swatch is always the look's own colour.
+    local function IsArcane() return P.GetStyle().key == "ARCANE" end
+    local function OpenColorPicker(which)
+        if not ColorPickerFrame then return end
+        local before = T.ValidColor(P.GetStoredTallyColor(which))
+        local cur = P.GetTallyColor(which)
+        local function Picked()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            P.SetTallyColor(which, { r, g, b })
+            T.RefreshOptionsPanel()
+        end
+        local function Cancelled()
+            P.SetTallyColor(which, before)
+            T.RefreshOptionsPanel()
+        end
+        pcall(function()
+            if ColorPickerFrame.SetupColorPickerAndShow then
+                ColorPickerFrame:SetupColorPickerAndShow({ r = cur[1], g = cur[2], b = cur[3], hasOpacity = false,
+                    swatchFunc = Picked, cancelFunc = Cancelled })
+            else
+                ColorPickerFrame.hasOpacity = false
+                ColorPickerFrame.func, ColorPickerFrame.cancelFunc = Picked, Cancelled
+                ColorPickerFrame.previousValues = { r = cur[1], g = cur[2], b = cur[3] }
+                ColorPickerFrame:SetColorRGB(cur[1], cur[2], cur[3])
+                ColorPickerFrame:Hide()
+                ColorPickerFrame:Show()
+            end
+        end)
+    end
+    local function ColorRow(x, rowY, labelText, labelW, which, presets, tipBody, shownFn)
+        local row = CreateFrame("Frame", nil, p)
+        row:SetSize(labelW + #presets * 22 + 82, 22)
+        row:SetPoint("TOPLEFT", p, "TOPLEFT", x, rowY - 1)
+        local label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        label:SetPoint("LEFT", row, "LEFT", 0, 0)
+        label:SetText(labelText)
+        local function SwatchTip(owner, name)
+            GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(labelText .. (name and (": " .. name) or ""), 1, 0.82, 0)
+            GameTooltip:AddLine(tipBody, 0.9, 0.9, 0.9, true)
+            GameTooltip:Show()
+        end
+        local function OwnColor()
+            if which == "rune" then return presets[1].c end
+            return P.StyleDefaults(P.GetStyle()).ink
+        end
+        row.swatches = {}
+        for k, pr in ipairs(presets) do
+            local b = CreateFrame("Button", nil, row)
+            b:SetSize(18, 18)
+            b:SetPoint("LEFT", row, "LEFT", labelW + (k - 1) * 22, 0)
+            b.ring = b:CreateTexture(nil, "BACKGROUND")
+            b.ring:SetAllPoints()
+            b.fill = b:CreateTexture(nil, "ARTWORK")
+            b.fill:SetPoint("TOPLEFT", b, "TOPLEFT", 2, -2)
+            b.fill:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -2, 2)
+            b.preset = pr
+            b:SetScript("OnClick", function()
+                local c = pr.c
+                if k == 1 then c = nil end                             -- the first swatch = the look's own
+                P.SetTallyColor(which, c)
+                T.RefreshOptionsPanel()
+            end)
+            b:SetScript("OnEnter", function(self) SwatchTip(self, pr.label) end)
+            b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            row.swatches[k] = b
+        end
+        if ColorPickerFrame then
+            local cb = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            cb:SetSize(70, 20)
+            cb:SetPoint("LEFT", row, "LEFT", labelW + #presets * 22 + 6, 0)
+            cb:SetText("Custom...")
+            cb:SetScript("OnClick", function() OpenColorPicker(which) end)
+            cb:SetScript("OnEnter", function(self) SwatchTip(self, "any colour") end)
+            cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            row.customBtn = cb
+        end
+        row.Refresh = function(self)
+            local stored = T.ValidColor(P.GetStoredTallyColor(which))
+            local own = OwnColor()
+            if stored and P.SameColor(stored, own) then stored = nil end
+            local any = false
+            for k, b in ipairs(self.swatches) do
+                local c = (k == 1) and own or b.preset.c
+                b.fill:SetColorTexture(c[1], c[2], c[3], 1)
+                local on
+                if k == 1 then on = (stored == nil) else on = stored ~= nil and P.SameColor(stored, c) end
+                any = any or on
+                b.selected = on
+                if on then b.ring:SetColorTexture(1, 0.82, 0, 1) else b.ring:SetColorTexture(0, 0, 0, 0.9) end
+            end
+            if self.customBtn then self.customBtn:SetText(any and "Custom..." or "Custom •") end
+            self:SetShown(not shownFn or shownFn())
+        end
+        table.insert(T.optionWidgets, row)
+        return row
+    end
+
     y = y - 2
     local lookBtn = Button("Look: Handkerchief notes", 210, 24, function()
         P.CycleStyle(); T.Save(); P.ApplyStyle(); Redraw()
     end, function(self) self:SetText("Look: " .. P.GetStyle().label) end)
     Tip(lookBtn, "Look of the Field Tally",
-        "Handkerchief notes: written on a lace-edged handkerchief.\nParchment: a pile of torn parchment pages.\nCrumpled paper: a sheet crumpled up and flattened out again, in pencil.\nTorn rag: a strip of cotton torn off a shirt, in soot.\nChalked slate: a smooth dark river stone, written on in chalk.\nCarved bark: a jagged slab of dark bark, the list carved into the red underbark.\nPipe-weed leaf: a cured leaf of Longbottom's finest, written in ink.\nEtched leather: a rough-cut piece of soft tan hide, the list pressed into it.\nArcane script: a mage's words of light hanging in the air, a rune circle turning behind them.\nTransparent window: a see-through panel in the standard font.")
-    local fontBtn = Button("Handwriting: Quill script", 200, 244, function()
+        "Handkerchief notes: written on a lace-edged handkerchief.\nParchment: a pile of torn parchment pages.\nCrumpled paper: a sheet crumpled up and flattened out again, in pencil.\nTorn rag: a strip of cotton torn off a shirt, in soot.\nChalked slate: a smooth dark river stone, written on in chalk.\nCarved bark: a jagged slab of dark bark, the list carved into the red underbark.\nPipe-weed leaf: a cured leaf of Longbottom's finest, written in ink.\nEtched leather: a rough-cut piece of soft tan hide, the list pressed into it.\nSanctified marble: a white marble tablet, the list cut in and gilded, glowing with holy light.\nGilded plate: a plate of beaten gold, the list engraved; light glints across it now and then.\nIlluminated vellum: a page of a holy book, gold-leaf border, the heading's first letter gilded.\nArcane script: a mage's words of light hanging in the air, a rune circle turning behind them.\nTransparent window: a see-through panel in the standard font.")
+    -- beside the Look button, only while Arcane script is the look
+    T.runeColorRow = ColorRow(244, y, "Runes", 42, "rune", P.ARCANE_RUNE_COLORS,
+        "Arcane script: the colour of the rune circle and its light (the glow round the words, the motes, ticks and strikes, the corner mark).",
+        IsArcane)
+    y = y - 28
+    local fontBtn = Button("Handwriting: Quill script", 210, 24, function()
         P.CycleFontStyle(); T.Save(); Redraw()
     end, function(self)
         -- some looks bring their own lettering (the window: UI font; carved bark: knife-cut letters)
@@ -5013,6 +5443,11 @@ function T.BuildOptionsPanel()
         self:SetAlpha(forced and 0.45 or 1)
     end)
     Tip(fontBtn, "Handwriting", "Quill script (Morpheus), rough scrawl (Skurri), plain print, or blotted scrawl (a bolder rough hand with ink spattered off the quill). The transparent window and carved bark bring their own lettering.")
+    y = y - 30
+
+    -- every look; each look remembers its own
+    T.inkColorRow = ColorRow(24, y, "Writing colour", 128, "ink", P.INK_COLORS,
+        "The colour of the tally's writing: the lines, heading and footer. Each look remembers its own; the first swatch is the look's own ink.")
     y = y - 32
 
     T.textSizeRow = RadiusSlider("Text size",
@@ -5107,7 +5542,7 @@ function T.BuildOptionsPanel()
     hint:SetPoint("TOPLEFT", p, "TOPLEFT", 20, y)
     hint:SetPoint("RIGHT", p, "RIGHT", -24, 0)
     hint:SetJustifyH("LEFT")
-    hint:SetText("Slash: /crq (options), /crq tally, /crq look [handkerchief|parchment|crumpled|rag|slate|bark|leaf|leather|arcane|window], /crq reset, /crq debug")
+    hint:SetText("Slash: /crq (options), /crq tally, /crq look [handkerchief|parchment|crumpled|rag|slate|bark|leaf|leather|marble|gilded|vellum|arcane|window], /crq reset, /crq debug")
     y = y - 30
 
     p:SetHeight(math.abs(y) + 20)
@@ -5268,6 +5703,9 @@ SlashCmdList["CACHEREQUEST"] = function(msg)
             stone = "STONE", rock = "STONE", chalk = "STONE", slate = "STONE", bark = "BARK", carved = "BARK", wood = "BARK",
             leaf = "LEAF", pipeweed = "LEAF", tobacco = "LEAF", longbottom = "LEAF",
             leather = "LEATHER", etched = "LEATHER", tooled = "LEATHER", hide = "LEATHER", suede = "LEATHER",
+            marble = "MARBLE", sanctified = "MARBLE", tablet = "MARBLE", holy = "MARBLE",
+            gilded = "GILDED", gold = "GILDED", plate = "GILDED", golden = "GILDED",
+            vellum = "VELLUM", illuminated = "VELLUM", book = "VELLUM", manuscript = "VELLUM",
             arcane = "ARCANE", mage = "ARCANE", magic = "ARCANE", rune = "ARCANE", runes = "ARCANE",
             window = "NATIVE", transparent = "NATIVE", native = "NATIVE" }
         if want and alias[want] then T.db.look = alias[want] else P.CycleStyle() end

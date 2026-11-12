@@ -609,7 +609,7 @@ local cpt2, _, _, ncx, ncy = f.corner:GetPoint(1)
 check(ncx == 3 and ncy == -3, "the page corner goes back to the frame's corner")
 local styleKeys = {}
 for _, s in ipairs(P.STYLES) do styleKeys[#styleKeys + 1] = s.key end
-check(table.concat(styleKeys, ",") == "HANDKERCHIEF,PARCHMENT,CRUMPLED,RAG,STONE,BARK,LEAF,LEATHER,ARCANE,NATIVE", "ten looks, in cycle order")
+check(table.concat(styleKeys, ",") == "HANDKERCHIEF,PARCHMENT,CRUMPLED,RAG,STONE,BARK,LEAF,LEATHER,MARBLE,GILDED,VELLUM,ARCANE,NATIVE", "thirteen looks, in cycle order")
 SlashCmdList["CACHEREQUEST"]("look handkerchief")
 check(T.db.look == "HANDKERCHIEF" and f.styleKey == "HANDKERCHIEF", "/crq look handkerchief")
 local fonts = {}
@@ -1019,6 +1019,111 @@ check(firstY == -4 - 22 - 8, "first quest starts below the bar with a gap (" .. 
     Fire("ADDON_LOADED", "CacheReQuest")
     check(T.db.textScale == 150 and T.db.opts.tallyLoot == true, "saved text size clamped; items come back if both were off")
     T.db.textScale = 100
+    Refresh("ZONE_CHANGED")
+end)()
+;(function()  -- (own function: locals limit) the looks from Handkerquest: marble, gilded plate, vellum
+    local T, P, f = ns.Tally, ns.Tally.P, CRQ_FieldTally
+    for _, key in ipairs({ "MARBLE", "GILDED", "VELLUM" }) do
+        SlashCmdList["CACHEREQUEST"]("look " .. string.lower(key))
+        local st = P.GetStyle()
+        check(T.db.look == key and f.styleKey == key and f.topSheet.body.__tex == st.image
+            and FileExists(root .. "/textures/" .. st.image:match("([%w_]+)$") .. ".tga"),
+            key .. ": /crq look picks it, and its texture is in the addon")
+        check(st.reward and st.rewardGold and st.inset and st.imageCorner, key .. ": reward colours, margins and corner set")
+        Refresh("ZONE_CHANGED")
+    end
+    -- marble: tablets underneath only mirrored (arches stay on top), holy light that breathes at its own pace
+    SlashCmdList["CACHEREQUEST"]("look marble")
+    Refresh("ZONE_CHANGED")
+    check(P.GetStyle().flips[2] == 0 and P.HALO and P.HALO.pulse and P.HALO.pulseSpeed == 1.2, "marble: mirrored tablets and a breathing glow")
+    local hc = f.titleFS.halo and f.titleFS.halo[1]
+    check(hc and hc.__shown, "marble: holy light round the heading")
+    f:GetScript("OnUpdate")(f, 0.02)                    -- the pulse runs without the arcane ring
+    check(not f.arcaneOn and #ERRORS == 0, "marble: the glow breathes without the arcane ring")
+    f.corner:Show(); f.corner.drawnKey = nil; P.DrawCorner(f.corner)
+    check(not f.corner.under[1].__shown and f.corner.foldEdge.__shown, "marble: a gilded corner mark, nothing folds")
+    -- gilded plate: a sheen that sweeps across inside the rim, then rests
+    SlashCmdList["CACHEREQUEST"]("look gilded")
+    check(f.sheenOn and f.sheen and f.sheen.a, "gilded plate: sheen built")
+    local realNow = NOW
+    NOW = 7000 + 0.8                                     -- halfway through a sweep (every 7 s, 1.6 s long)
+    f:GetScript("OnUpdate")(f, 0.02)
+    local x0 = f.sheen.a.__points[1] and f.sheen.a.__points[1][4]
+    local w = f:GetWidth()
+    check(f.sheen.a.__shown and f.sheen.b.__shown and x0 and x0 >= w * P.GetStyle().inset[1] - 0.01,
+        "gilded plate: the light is crossing the plate, inside the rim")
+    NOW = 7000 + 3                                       -- between sweeps
+    f:GetScript("OnUpdate")(f, 0.02)
+    check(not f.sheen.a.__shown and not f.sheen.b.__shown, "gilded plate: the plate rests between sweeps")
+    NOW = realNow
+    -- vellum: gilded first letter of the heading
+    SlashCmdList["CACHEREQUEST"]("look vellum")
+    Refresh("ZONE_CHANGED")
+    check(f.titleFS.__text:find("^|c" .. P.Hex(P.GetStyle().initial)), "vellum: the heading's first letter is gilded (" .. f.titleFS.__text .. ")")
+    check(not f.sheenOn and not f.sheen.a.__shown, "vellum: no sheen left over from the plate")
+    SlashCmdList["CACHEREQUEST"]("look leather")
+    Refresh("ZONE_CHANGED")
+    check(not f.titleFS.__text:find("^|c"), "other looks: the heading starts in plain ink")
+
+    -- writing colour: per look, the shading follows, the first swatch puts the look's own back
+    local own = P.CopyTable(P.GetStyle().ink)
+    local ownFaded = P.CopyTable(P.GetStyle().faded)
+    P.SetTallyColor("ink", { 0.14, 0.20, 0.50 })
+    local st = P.GetStyle()
+    check(P.SameColor(st.ink, { 0.14, 0.20, 0.50 }) and P.SameColor(P.INK, st.ink) and T.db.inkColors.LEATHER,
+        "writing colour: leather writes in indigo")
+    check(P.SameColor(st.faded, P.ShiftColor(ownFaded, own, { 0.14, 0.20, 0.50 })), "writing colour: faded lines keep their shading")
+    SlashCmdList["CACHEREQUEST"]("look leaf")
+    check(not T.db.inkColors.LEAF and P.INK[1] < 0.1, "writing colour: each look keeps its own (leaf unchanged)")
+    SlashCmdList["CACHEREQUEST"]("look slate")
+    local dust = P.CopyTable(P.GetStyle().bleed)
+    P.SetTallyColor("ink", { 0.96, 0.80, 0.34 })
+    check(not P.SameColor(P.GetStyle().bleed, dust) and P.GetStyle().bleed[4] == dust[4], "writing colour: the slate's chalk dust follows the chalk")
+    P.SetTallyColor("ink", nil)
+    check(P.SameColor(P.GetStyle().bleed, dust) and T.db.inkColors.STONE == nil, "writing colour: the first swatch brings back the look's own")
+    SlashCmdList["CACHEREQUEST"]("look leather")
+    check(P.SameColor(P.GetStyle().ink, { 0.14, 0.20, 0.50 }), "writing colour: leather still remembers indigo")
+
+    -- rune colour (arcane only)
+    SlashCmdList["CACHEREQUEST"]("look arcane")
+    P.SetTallyColor("rune", { 0.35, 1.00, 0.30 })
+    local ac = P.GetStyle().arcane
+    check(P.SameColor(ac.ringColor, { 0.35, 1.00, 0.30 }) and P.SameColor(P.GetStyle().halo.color, { 0.35, 1.00, 0.30 })
+        and P.SameColor(P.BLEED, { 0.35, 1.00, 0.30 }), "rune colour: fel-green runes, glow and strikes")
+    f:GetScript("OnUpdate")(f, 0.02)
+    check(#ERRORS == 0, "rune colour: the motes take it without errors")
+    P.SetTallyColor("rune", nil)
+    check(P.SameColor(P.GetStyle().arcane.ringColor, P.ARCANE_RUNE_COLORS[1].c), "rune colour: back to violet")
+
+    -- options: Runes only while Arcane script is the look; Writing colour always
+    T.RefreshOptionsPanel()
+    check(T.runeColorRow and T.runeColorRow.__shown and T.inkColorRow and T.inkColorRow.__shown, "options: Runes and Writing colour rows while arcane")
+    SlashCmdList["CACHEREQUEST"]("look leather")
+    check(not T.runeColorRow.__shown and T.inkColorRow.__shown, "options: Runes hidden for other looks")
+    local sw = T.inkColorRow.swatches
+    check(#sw == #P.INK_COLORS and sw[4].selected and not sw[1].selected, "options: the indigo swatch is ticked for leather")
+    sw[1]:GetScript("OnClick")(sw[1])
+    check(T.db.inkColors.LEATHER == nil and sw[1].selected and P.SameColor(P.INK, P.StyleDefaults(P.GetStyle()).ink),
+        "options: the first swatch puts leather's own ink back")
+    sw[2]:GetScript("OnClick")(sw[2])
+    check(P.SameColor(T.db.inkColors.LEATHER, P.INK_COLORS[2].c), "options: clicking a swatch sets it")
+
+    -- saved across a reload: the new looks, the colours; broken colours dropped
+    QRF_SavedState.fieldTally = { look = "VELLUM", runeColor = { 1, 0.48, 0.12 },
+        inkColors = { LEATHER = { 0.08, 0.07, 0.06 }, MARBLE = { "x" }, NOPE = { 1, 1, 1 } } }
+    Fire("ADDON_LOADED", "CacheReQuest")
+    check(T.db.look == "VELLUM", "saved: vellum stays the look after a reload")
+    check(P.SameColor(T.db.runeColor, { 1, 0.48, 0.12 }) and P.SameColor(T.db.inkColors.LEATHER, { 0.08, 0.07, 0.06 })
+        and T.db.inkColors.MARBLE == nil and T.db.inkColors.NOPE == nil, "saved: colours kept, broken or unknown ones dropped")
+    for _, key in ipairs({ "MARBLE", "GILDED" }) do
+        QRF_SavedState.fieldTally = { look = key }
+        Fire("ADDON_LOADED", "CacheReQuest")
+        check(T.db.look == key, "saved: " .. key .. " stays the look after a reload")
+    end
+    QRF_SavedState.fieldTally = { look = "RAG" }
+    Fire("ADDON_LOADED", "CacheReQuest")
+    P.ApplyStyle()
+    check(P.SameColor(P.INK, P.StyleDefaults(P.GetStyle()).ink), "back to the torn rag's own ink")
     Refresh("ZONE_CHANGED")
 end)()
 -- 24) Ticker keeps it current and nothing errored

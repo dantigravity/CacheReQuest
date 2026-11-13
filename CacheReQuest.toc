@@ -2,7 +2,7 @@
 ## Title: Cache ReQuest
 ## Notes: Filter your Quest Log, Objective Tracker and World Map by currencies, seasonal tokens, items and gold, stack nearby tracker quests, and keep a handwritten Field Tally of the quest items left to collect and tasks left to do. /crq
 ## Author: Dantigravity
-## Version: 1.4.2
+## Version: 1.4.3
 ## IconTexture: Interface\MoneyFrame\UI-GoldIcon
 ## Category-enUS: Quests
 ## SavedVariablesPerCharacter: QRF_SavedState

@@ -971,7 +971,7 @@ P.FONT_STYLES = {
       bold = 0.8, haloScale = 0.55 },
 }
 
--- The handwriting actually used: some looks bring their own lettering (style.font)
+-- The handwriting actually used: carved bark brings its own lettering (style.font)
 function P.EffectiveFont()
     local look = P.GetStyle()
     local st = P.GetFontStyle()
@@ -1538,7 +1538,7 @@ P.STYLES = {
         wash = { 1, 1, 1, 0.05 }, washFlash = { 1.0, 0.82, 0.0, 0.40 },
         divider = { 1, 1, 1, 0.08 }, highlight = { 1, 1, 1, 0.07 },
         grip = { 0.80, 0.80, 0.80, 0.85 }, pad = 0,
-        textShadow = true, font = "PLAIN", name = { 0.95, 0.95, 0.95 },
+        textShadow = true, name = { 0.95, 0.95, 0.95 },                 -- in the chosen handwriting
         corner = { u1 = { 0.08, 0.08, 0.10 }, u2 = { 0.22, 0.22, 0.25 }, tip = { 0.50, 0.50, 0.55 },
                    crease = { 0.25, 0.25, 0.28 }, edge = { 0.60, 0.60, 0.65, 0.80 }, cut = { 0.50, 0.50, 0.55, 0.80 },
                    shadow = { 0, 0, 0 } },
@@ -5420,11 +5420,144 @@ function T.BuildOptionsPanel()
     end
 
     y = y - 2
-    local lookBtn = Button("Look: Handkerchief notes", 210, 24, function()
-        P.CycleStyle(); T.Save(); P.ApplyStyle(); Redraw()
-    end, function(self) self:SetText("Look: " .. P.GetStyle().label) end)
-    Tip(lookBtn, "Look of the Field Tally",
-        "Handkerchief notes: written on a lace-edged handkerchief.\nParchment: a pile of torn parchment pages.\nCrumpled paper: a sheet crumpled up and flattened out again, in pencil.\nTorn rag: a strip of cotton torn off a shirt, in soot.\nChalked slate: a smooth dark river stone, written on in chalk.\nCarved bark: a jagged slab of dark bark, the list carved into the red underbark.\nPipe-weed leaf: a cured leaf of Longbottom's finest, written in ink.\nEtched leather: a rough-cut piece of soft tan hide, the list pressed into it.\nSanctified marble: a white marble tablet, the list cut in and gilded, glowing with holy light.\nGilded plate: a plate of beaten gold, the list engraved; light glints across it now and then.\nIlluminated vellum: a page of a holy book, gold-leaf border, the heading's first letter gilded.\nArcane script: a mage's words of light hanging in the air, a rune circle turning behind them.\nTransparent window: a see-through panel in the standard font.")
+    -- Look: a drop-down list of every look (a little swatch of each, the current one ticked; hover one
+    -- to read about it). Clicking outside the list, or the button again, closes it.
+    -- EDIT: add a line here for every new look in P.STYLES.
+    local LOOK_BLURBS = {
+        HANDKERCHIEF = "Written on a lace-edged handkerchief.",
+        PARCHMENT = "A pile of torn parchment pages.",
+        CRUMPLED = "A sheet crumpled up and flattened out again, in pencil.",
+        RAG = "A strip of cotton torn off a shirt, in soot.",
+        STONE = "A smooth dark river stone, written on in chalk.",
+        BARK = "A jagged slab of dark bark, the list carved into the red underbark.",
+        LEAF = "A cured leaf of Longbottom's finest, written in ink.",
+        LEATHER = "A rough-cut piece of soft tan hide, the list pressed into it.",
+        MARBLE = "A white marble tablet, the list cut in and gilded, glowing with holy light.",
+        GILDED = "A plate of beaten gold, the list engraved; light glints across it now and then.",
+        VELLUM = "A page of a holy book with a gold-leaf border, the heading in red, its first letter gilded.",
+        ARCANE = "A mage's words of light hanging in the air, a rune circle turning behind them.",
+        NATIVE = "A see-through WoW-style panel, in the handwriting you pick.",
+    }
+    local lookBtn = Button("Look: Torn rag", 210, 24, function(self)
+        if self.list:IsShown() then self.list:Hide() else self.list:Show() end
+    end, function(self)
+        self:SetText("Look: " .. P.GetStyle().label)
+        if self.list and self.list:IsShown() then self.list:Refresh() end
+    end)
+    lookBtn.arrow = lookBtn:CreateTexture(nil, "OVERLAY")
+    lookBtn.arrow:SetSize(16, 16)
+    lookBtn.arrow:SetPoint("RIGHT", lookBtn, "RIGHT", -4, 0)
+    lookBtn.arrow:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+    lookBtn:SetScript("OnEnter", function(self)
+        if self.list:IsShown() then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Look of the Field Tally", 1, 0.82, 0)
+        GameTooltip:AddLine("Click to pick one from the list.", 0.9, 0.9, 0.9, true)
+        GameTooltip:Show()
+    end)
+    lookBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    local ROW_H = 20
+    -- Layers: the list sits above everything (FULLSCREEN_DIALOG), the click-catcher just under it (DIALOG,
+    -- still above the Settings window). Set again every time the list opens: when Settings shows our panel
+    -- it re-parents it, which pulls the list back down to the window's layer, under the catcher, and every
+    -- click on a look would then only close the list.
+    local list = CreateFrame("Frame", nil, lookBtn)
+    list:SetFrameStrata("FULLSCREEN_DIALOG")
+    list:SetToplevel(true)
+    list:EnableMouse(true)
+    list:SetPoint("TOPLEFT", lookBtn, "BOTTOMLEFT", 0, -2)
+    list:SetSize(230, #P.STYLES * ROW_H + 10)
+    list.bg = list:CreateTexture(nil, "BACKGROUND")
+    list.bg:SetAllPoints()
+    list.bg:SetColorTexture(0.06, 0.05, 0.04, 0.96)
+    for _, edge in ipairs({ { "TOPLEFT", "TOPRIGHT", 0, 1 }, { "BOTTOMLEFT", "BOTTOMRIGHT", 0, 1 },
+                            { "TOPLEFT", "BOTTOMLEFT", 1, 0 }, { "TOPRIGHT", "BOTTOMRIGHT", 1, 0 } }) do
+        local t = list:CreateTexture(nil, "BORDER")
+        t:SetColorTexture(0.6, 0.5, 0.2, 0.8)
+        t:SetPoint(edge[1], list, edge[1], 0, 0)
+        t:SetPoint(edge[2], list, edge[2], 0, 0)
+        if edge[3] == 1 then t:SetWidth(1) else t:SetHeight(1) end
+    end
+    list:Hide()
+    -- a click anywhere else closes the list
+    local catcher = CreateFrame("Button", nil, UIParent)
+    catcher:SetAllPoints(UIParent)
+    catcher:SetFrameStrata("DIALOG")
+    catcher:SetFrameLevel(1)
+    catcher:RegisterForClicks("AnyUp")
+    catcher:SetScript("OnClick", function()
+        -- if a click still lands here over a look (layers changed under us), pick that look
+        for _, row in ipairs(list.rows or {}) do
+            if row:IsShown() and row:IsMouseOver() then row:GetScript("OnClick")(row); return end
+        end
+        list:Hide()
+    end)
+    catcher:Hide()
+    list:SetFrameLevel(catcher:GetFrameLevel() + 5)
+    list.rows = {}
+    for k, st in ipairs(P.STYLES) do
+        local row = CreateFrame("Button", nil, list)
+        row:SetSize(222, ROW_H)
+        row:SetPoint("TOPLEFT", list, "TOPLEFT", 4, -5 - (k - 1) * ROW_H)
+        row.hl = row:CreateTexture(nil, "HIGHLIGHT")
+        row.hl:SetAllPoints()
+        row.hl:SetColorTexture(1, 0.82, 0, 0.15)
+        row.tick = row:CreateTexture(nil, "ARTWORK")
+        row.tick:SetSize(14, 14)
+        row.tick:SetPoint("LEFT", row, "LEFT", 2, 0)
+        row.tick:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+        row.swatch = row:CreateTexture(nil, "ARTWORK")
+        row.swatch:SetSize(16, 16)
+        row.swatch:SetPoint("LEFT", row, "LEFT", 20, 0)
+        if st.image then
+            row.swatch:SetTexture(st.image)
+            row.swatch:SetTexCoord(0.25, 0.75, 0.25, 0.75)          -- the middle of the material
+        else
+            local c = st.paper
+            row.swatch:SetColorTexture(c[1], c[2], c[3], math.max(c[4] or 1, 0.6))
+        end
+        row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        row.label:SetPoint("LEFT", row.swatch, "RIGHT", 6, 0)
+        row.label:SetText(st.label)
+        row.key = st.key
+        row:SetScript("OnClick", function(self)
+            T.db.look = self.key
+            list:Hide()
+            T.Save()
+            P.ApplyStyle()
+            Redraw()
+            T.RefreshOptionsPanel()
+        end)
+        row:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(list, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(st.label, 1, 0.82, 0)
+            if LOOK_BLURBS[st.key] then GameTooltip:AddLine(LOOK_BLURBS[st.key], 0.9, 0.9, 0.9, true) end
+            GameTooltip:Show()
+        end)
+        row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        list.rows[k] = row
+    end
+    list.Refresh = function(self)
+        local cur = P.GetStyle().key
+        for _, row in ipairs(self.rows) do
+            row.tick:SetShown(row.key == cur)
+            row.label:SetTextColor(1, row.key == cur and 0.82 or 1, row.key == cur and 0 or 1)
+        end
+    end
+    list:SetScript("OnShow", function(self)
+        catcher:SetFrameStrata("DIALOG")
+        catcher:Show()
+        self:SetFrameStrata("FULLSCREEN_DIALOG")
+        self:Raise()
+        self:Refresh()
+        GameTooltip:Hide()
+    end)
+    list:SetScript("OnHide", function() catcher:Hide() end)
+    lookBtn.list = list
+    list.catcher = catcher
+    T.lookDropDown = list
+    outer:HookScript("OnHide", function() list:Hide() end)
     -- beside the Look button, only while Arcane script is the look
     T.runeColorRow = ColorRow(244, y, "Runes", 42, "rune", P.ARCANE_RUNE_COLORS,
         "Arcane script: the colour of the rune circle and its light (the glow round the words, the motes, ticks and strikes, the corner mark).",
@@ -5433,7 +5566,7 @@ function T.BuildOptionsPanel()
     local fontBtn = Button("Handwriting: Quill script", 210, 24, function()
         P.CycleFontStyle(); T.Save(); Redraw()
     end, function(self)
-        -- some looks bring their own lettering (the window: UI font; carved bark: knife-cut letters)
+        -- carved bark brings its own lettering (knife-cut letters)
         local forced = P.GetStyle().font
         local label = P.GetFontStyle().label
         if forced then
@@ -5442,7 +5575,7 @@ function T.BuildOptionsPanel()
         self:SetText("Handwriting: " .. label)
         self:SetAlpha(forced and 0.45 or 1)
     end)
-    Tip(fontBtn, "Handwriting", "Quill script (Morpheus), rough scrawl (Skurri), plain print, or blotted scrawl (a bolder rough hand with ink spattered off the quill). The transparent window and carved bark bring their own lettering.")
+    Tip(fontBtn, "Handwriting", "Quill script (Morpheus), rough scrawl (Skurri), plain print, or blotted scrawl (a bolder rough hand with ink spattered off the quill). Carved bark brings its own knife-cut lettering.")
     y = y - 30
 
     -- every look; each look remembers its own

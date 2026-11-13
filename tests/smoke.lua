@@ -602,7 +602,10 @@ CheckImageLook("CRUMPLED", "crumpled_paper", 8, 0.35, 0.20, { 0.036, 0.034 })
 CheckImageLook("RAG", "torn_rag", 8, 0.32, 0.15, { 0.068, 0.046 })
 T.db.look = "NATIVE"; P.ApplyStyle(); Refresh("ZONE_CHANGED")
 check(T.db.look == "NATIVE" and f.visibleBackSheets == 0 and not f.shadowSheet.__shown, "transparent window: no page pile")
-check(f.titleFS.inkKey:find("^PLAIN:"), "transparent window uses the standard font")
+check(f.titleFS.inkKey:find("^" .. T.db.font .. ":") and not P.GetStyle().font, "transparent window uses the chosen handwriting (" .. T.db.font .. ")")
+T.db.font = "SCRAWL"; Refresh("ZONE_CHANGED")
+check(f.titleFS.inkKey:find("^SCRAWL:"), "transparent window: switching handwriting changes its writing")
+T.db.font = "QUILL"; Refresh("ZONE_CHANGED")
 check(f.topSheet.body.__tex == "color" and f.topSheet.body.__tc and table.concat(f.topSheet.body.__tc, ",") == "0,1,0,1",
     "switching away from an image look restores the plain sheet")
 local cpt2, _, _, ncx, ncy = f.corner:GetPoint(1)
@@ -1100,6 +1103,32 @@ end)()
     check(T.runeColorRow and T.runeColorRow.__shown and T.inkColorRow and T.inkColorRow.__shown, "options: Runes and Writing colour rows while arcane")
     SlashCmdList["CACHEREQUEST"]("look leather")
     check(not T.runeColorRow.__shown and T.inkColorRow.__shown, "options: Runes hidden for other looks")
+
+    -- Look drop-down: one row per look with a swatch, the current one ticked; picking one closes it
+    local dd = T.lookDropDown
+    check(dd and #dd.rows == #P.STYLES and not dd.__shown, "look list: one row per look, closed to start")
+    local btn = dd:GetParent()
+    btn:GetScript("OnClick")(btn)
+    check(dd.__shown and dd.catcher.__shown, "look list: the Look button opens it (with a click-catcher)")
+    local ticked = {}
+    for _, r in ipairs(dd.rows) do if r.tick.__shown then ticked[#ticked + 1] = r.key end end
+    check(table.concat(ticked, ",") == "LEATHER", "look list: only the current look is ticked")
+    local marbleRow, nativeRow
+    for _, r in ipairs(dd.rows) do
+        if r.key == "MARBLE" then marbleRow = r elseif r.key == "NATIVE" then nativeRow = r end
+    end
+    check(marbleRow.swatch.__tex == P.STYLES[9].image and marbleRow.swatch.__tc and nativeRow.swatch.__tex == "color",
+        "look list: image looks show their material, drawn looks their paper colour")
+    marbleRow:GetScript("OnClick")(marbleRow)
+    check(T.db.look == "MARBLE" and f.styleKey == "MARBLE" and not dd.__shown and not dd.catcher.__shown
+        and QRF_SavedState.fieldTally.look == "MARBLE", "look list: picking marble applies and saves it, and closes the list")
+    check(btn.__text == "Look: Sanctified marble", "look list: the button names the new look")
+    btn:GetScript("OnClick")(btn)
+    dd.catcher:GetScript("OnClick")(dd.catcher)
+    check(not dd.__shown and T.db.look == "MARBLE", "look list: a click elsewhere just closes it")
+    btn:GetScript("OnClick")(btn); btn:GetScript("OnClick")(btn)
+    check(not dd.__shown, "look list: the button closes it again")
+    SlashCmdList["CACHEREQUEST"]("look leather")
     local sw = T.inkColorRow.swatches
     check(#sw == #P.INK_COLORS and sw[4].selected and not sw[1].selected, "options: the indigo swatch is ticked for leather")
     sw[1]:GetScript("OnClick")(sw[1])

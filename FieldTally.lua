@@ -957,7 +957,7 @@ T.ResetShoppingListPosition = ResetShoppingListPosition
 -- ----------------------------------------------------------------------------
 -- INK & QUILL HELPERS
 -- ----------------------------------------------------------------------------
--- Handwriting faces built into the client (no font files shipped with the addon).
+-- Handwriting faces built into the client, plus one shipped with the addon (Typewriter, fonts\).
 -- Morpheus is the calligraphic face Blizzard uses for books & letters.
 -- EDIT: item / title / small are font sizes for the list rows, the page heading and the footer.
 P.FONT_STYLES = {
@@ -969,6 +969,12 @@ P.FONT_STYLES = {
     -- haloScale = wet ink spreads less round them (a tight bleed, not a blur)
     { key = "BLOTTED", label = "Blotted scrawl", path = "Fonts\\SKURRI.TTF", item = 12, title = 14, small = 10, drops = true,
       bold = 0.8, haloScale = 0.55 },
+    -- a worn typewriter (from HandkerSheaf, made for the courier dispatch): Special Elite by Astigmatic,
+    -- Apache 2.0 (fonts\LICENSE-SpecialElite.txt must ship with it). If the client won't load it,
+    -- P.SetInkFont writes in plain print instead.
+    { key = "TYPEWRITER", label = "Typewriter",
+      path = "Interface\\AddOns\\" .. (ADDON_NAME or "CacheReQuest") .. "\\fonts\\SpecialElite-Regular.ttf",
+      item = 12, title = 14, small = 10 },
 }
 
 -- The handwriting actually used: carved bark brings its own lettering (style.font)
@@ -1496,6 +1502,33 @@ P.STYLES = {
                    shadow = { 0.10, 0.08, 0.05 } },
     },
     {
+        -- a courier's dispatch (from HandkerSheaf): a sheet torn off a field-message pad along its perforation,
+        -- carried folded in four in a pouch. Cheap buff paper, a printed form (FROM / TO, a red serial number and
+        -- margin rule, TIME / SIGNED at the foot), a tea ring, a thumbprint; a faded red PASSED stamp lettered
+        -- with your guild's name while you're in one (P.LayoutStamp). Written in copying pencil (violet-grey,
+        -- dry: no wet ink). Paper bends: a real fold.
+        key = "DISPATCH", label = "Courier dispatch",
+        image = P.TEXTURE_DIR .. "courier_dispatch",
+        paper = { 1, 1, 1, 1 }, depth = 1,
+        back = { { 0.93, 0.91, 0.86, 1 }, { 0.87, 0.85, 0.79, 1 }, { 0.81, 0.78, 0.72, 1 } },
+        imageCorner = { 0.042, 0.047 },        -- the sheet's own (worn round) corner
+        shadowAlpha = 0.33, pile = true,
+        ink = { 0.27, 0.22, 0.38 }, inkRed = { 0.66, 0.16, 0.12 }, inkGreen = { 0.20, 0.38, 0.22 },
+        title = { 0.24, 0.19, 0.36 }, faded = { 0.52, 0.49, 0.50 }, footer = { 0.36, 0.32, 0.40 },
+        sub = { 0.44, 0.40, 0.46 }, close = { 0.32, 0.28, 0.36 }, gear = { 0.32, 0.28, 0.36 },
+        reward = { 0.20, 0.30, 0.42 }, rewardGold = { 0.52, 0.34, 0.06 },
+        wash = { 0.40, 0.36, 0.25, 0.06 }, washFlash = { 0.95, 0.72, 0.20, 0.45 },
+        divider = { 0.30, 0.28, 0.30, 0.14 }, highlight = { 0.40, 0.35, 0.20, 0.08 },
+        grip = { 0.40, 0.36, 0.40, 0.85 }, pad = 8,
+        inset = { 0.115, 0.150, 0.060, 0.125 },  -- right of the red margin rule, between the printed header and foot
+        -- x, y = the stamp's middle (fractions of the sheet from the top-left), size = of the sheet's smaller side
+        stamp = { image = P.TEXTURE_DIR .. "dispatch_stamp", x = 0.72, y = 0.70, size = 0.34,
+                  rot = -0.24, color = { 0.70, 0.16, 0.15 }, alpha = 0.62, font = "Fonts\\ARIALN.TTF" },
+        corner = { u1 = { 0.52, 0.48, 0.38 }, u2 = { 0.84, 0.80, 0.68 }, tip = { 0.92, 0.88, 0.76 },
+                   crease = { 0.74, 0.70, 0.58 }, edge = { 0.45, 0.40, 0.30, 0.70 }, cut = { 0.55, 0.50, 0.40, 0.60 },
+                   shadow = { 0.10, 0.08, 0.05 } },
+    },
+    {
         -- a mage's writing hanging in the air: words of violet-white light over a faint haze (256px), a rune
         -- circle turning slowly behind them (arcane.ring, added light) and motes drifting up. Nothing to fold,
         -- so the page corner is a glowing mark (rigid), and there's no pile: the footer says which page.
@@ -1783,6 +1816,7 @@ function P.ApplyStyle(f)
     P.LayoutInkGrain(f)
     P.LayoutArcane(f)
     P.LayoutSheen(f)
+    P.LayoutStamp(f)                         -- the courier dispatch's guild stamp (only in a guild)
     if f.corner then f.corner.drawnKey = nil; P.DrawCorner(f.corner) end
     P.ApplyStackLayout(f)
 end
@@ -1926,6 +1960,101 @@ function P.LayoutSheen(f)
     ApplyHorizontalGradient(f.sheen.a, c[1], c[2], c[3], 0, 1)
     ApplyHorizontalGradient(f.sheen.b, c[1], c[2], c[3], 1, 0)
     f.sheenOn = true
+end
+
+-- The player's guild, or nil
+function T.GuildName()
+    local name = T.Call(GetGuildInfo, "player")
+    return (type(name) == "string" and name ~= "") and name or nil
+end
+
+-- The courier dispatch's rubber stamp (style.stamp, from HandkerSheaf): drawn on the top sheet only while
+-- you're in a guild, with the guild's name lettered round the ring between its two rings (textures\
+-- dispatch_stamp leaves that band empty). One FontString per letter, turned along the ring where the client
+-- can turn text, each inked a little differently (a hash of the name and the letter's place, so it never
+-- changes between redraws). Kept round when the window is stretched. No guild = no stamp.
+P.STAMP_MAX_LETTERS = 32
+P.STAMP_BAND = 101 / 128            -- the band's middle, as a fraction of the stamp's radius (dispatch_stamp)
+P.STAMP_BAND_W = 23 / 128           -- its width
+function P.LayoutStamp(f)
+    if not f or not f.topSheet then return end
+    local sp = P.GetStyle().stamp
+    local guild = sp and T.GuildName()
+    local S = f.stamp
+    if not guild then
+        if S then
+            S.ring:Hide()
+            for _, l in ipairs(S.letters) do l:Hide() end
+        end
+        f.stampKey, f.stampOn = nil, false
+        return
+    end
+    local w, h = f:GetWidth() or 230, f:GetHeight() or 175
+    local size = math.max(24, math.floor(math.min(w, h) * sp.size + 0.5))
+    local key = guild .. ":" .. size .. ":" .. math.floor(w) .. ":" .. math.floor(h)
+    f.stampOn = true
+    if S and f.stampKey == key and S.ring:IsShown() then return end
+    f.stampKey = key
+    if not S then
+        S = { letters = {} }
+        S.ring = f.topSheet:CreateTexture(nil, "BORDER")         -- on the paper, under the writing
+        f.stamp = S
+    end
+    local c = sp.color
+    local cx, cy = w * sp.x, -h * sp.y
+    S.ring:SetTexture(sp.image)
+    S.ring:SetVertexColor(c[1], c[2], c[3], sp.alpha)
+    S.ring:SetSize(size, size)
+    S.ring:ClearAllPoints()
+    S.ring:SetPoint("CENTER", f.topSheet, "TOPLEFT", cx, cy)
+    if S.ring.SetRotation then pcall(S.ring.SetRotation, S.ring, sp.rot) end
+    S.ring:Show()
+
+    -- the name in capitals, one letter at a time (UTF-8 aware), centred on the top of the ring
+    local chars = {}
+    for ch in string.upper(guild):gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        chars[#chars + 1] = ch
+        if #chars >= P.STAMP_MAX_LETTERS then break end
+    end
+    local rb = size * 0.5 * P.STAMP_BAND
+    local fontSize = math.max(5, math.floor(size * 0.5 * P.STAMP_BAND_W * 0.95))
+    local widths, total
+    -- smaller letters until the name fits in 300 degrees of the ring (never under 5px)
+    while true do
+        widths, total = {}, 0
+        for i, ch in ipairs(chars) do
+            local fs = S.letters[i]
+            if not fs then
+                fs = f.topSheet:CreateFontString(nil, "BORDER")
+                S.letters[i] = fs
+            end
+            fs:SetFont(sp.font, fontSize, "")
+            fs:SetText(ch)
+            local lw = (ch == " ") and fontSize * 0.35 or (fs:GetStringWidth() or 0)
+            if lw <= 0 then lw = fontSize * 0.6 end
+            widths[i] = lw
+            total = total + lw + ((i > 1) and fontSize * 0.12 or 0)
+        end
+        if total <= rb * math.rad(300) or fontSize <= 5 then break end
+        fontSize = fontSize - 1
+    end
+    local seed = 0
+    for i = 1, #guild do seed = (seed * 31 + string.byte(guild, i)) % 100003 end
+    local s = 0
+    for i, ch in ipairs(chars) do
+        local fs = S.letters[i]
+        local mid = s + widths[i] / 2
+        s = s + widths[i] + fontSize * 0.12
+        local th = math.pi / 2 + (total / 2 - mid) / rb + sp.rot      -- left to right across the top
+        fs:ClearAllPoints()
+        fs:SetPoint("CENTER", f.topSheet, "TOPLEFT", cx + rb * math.cos(th), cy + rb * math.sin(th))
+        if fs.SetRotation then pcall(fs.SetRotation, fs, th - math.pi / 2) end
+        local ink = 0.68 + 0.32 * (((seed + i * 7919) % 97) / 96)              -- each letter inked its own way
+        ink = ink * (0.82 + 0.18 * math.max(0, -math.cos(th)))                 -- pressed harder on the left
+        fs:SetTextColor(c[1], c[2], c[3], math.min(1, sp.alpha * ink * 1.15))
+        fs:SetShown(ch ~= " ")
+    end
+    for i = #chars + 1, #S.letters do S.letters[i]:Hide() end
 end
 
 function P.AnimateSheen(f, now)
@@ -2443,6 +2572,7 @@ function P.OnUpdate(f, elapsed)
         P.PulseHalo(f, GetTime())
     end
     if f.sheenOn then P.AnimateSheen(f, GetTime()) end
+    if P.AnimateJournal then P.AnimateJournal(f, dt) end     -- Journal.lua: gold glow, a note flying in, the tabs
 
     local c = f.corner
     if c and c:IsShown() then
@@ -2472,7 +2602,8 @@ function P.CheckAreaChange(f)
     P.lastAreaSig = sig
     P.currentGlowUntil = GetTime() + 7
 
-    if T.db.opts.autoFrontOnAreaChange and P.selectedKey ~= P.CURRENT_KEY then
+    -- never while you're writing a task / note or searching the Journal (the page would turn under the box)
+    if T.db.opts.autoFrontOnAreaChange and P.selectedKey ~= P.CURRENT_KEY and not (P.IsWriting and P.IsWriting()) then
         if f:IsShown() and not f.shuffle then
             f.shuffle = { t = 0, dur = 0.55, key = P.CURRENT_KEY, swapped = false, dir = -1 }
         elseif not f.shuffle then
@@ -2485,8 +2616,9 @@ end
 -- ----------------------------------------------------------------------------
 -- CHECKLIST ROWS (hand-inked box, quill tick, per-line strike-through)
 -- ----------------------------------------------------------------------------
-local function AcquireShoppingListRow(idx, parent)
-    local row = T.rowPool[idx]
+local function AcquireShoppingListRow(idx, parent, pool)
+    pool = pool or T.rowPool                -- Journal.lua's "For me" tasks keep their own pool
+    local row = pool[idx]
     if row then return row end
 
     row = CreateFrame("Button", nil, parent)
@@ -2554,10 +2686,11 @@ local function AcquireShoppingListRow(idx, parent)
     row.divider:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -2, 0)
     row.divider:SetColorTexture(0.45, 0.32, 0.15, 0.14)
 
-    T.rowPool[idx] = row
+    pool[idx] = row
     P.StyleRow(row)
     return row
 end
+P.AcquireRow = AcquireShoppingListRow
 
 -- the box's four crooked strokes, in the current ink
 function P.DrawBoxSides(box)
@@ -2975,6 +3108,10 @@ local function EnsureShoppingListFrame()
     f.footerFS = footerFS
 
     f:SetScript("OnMouseWheel", function(_, delta)
+        if P.journalCalendar and P.selectedKey == P.JOURNAL_KEY then      -- the Journal's calendar: month by month
+            P.ShiftCalendar((delta or 0) > 0 and -1 or 1)
+            return
+        end
         local total = f.totalItems or 0
         local maxScroll = math.max(0, total - 1)
         T.scroll = math.min(maxScroll, math.max(0, T.scroll - delta))
@@ -3070,6 +3207,7 @@ local function EnsureShoppingListFrame()
         P.LayoutPads(self)
         P.LayoutInkGrain(self)
         P.LayoutArcane(self)
+        P.LayoutStamp(self)
         P.ApplyStackLayout(self)
         -- texture looks: the corner sits on the image's own corner, which moves as the window resizes
         if self.corner and self.corner:IsShown() then
@@ -3392,7 +3530,10 @@ function P.HideKindHeadings(f, from)
 end
 
 -- Would the tally be put away with these pages? (no lines anywhere, or "hide when nothing is nearby")
+-- While "For me" is on, never: it's simply on or off, since your tasks, the writing line and the Journal
+-- tab are on it (Journal.lua).
 function P.ShouldHideTally(areas)
+    if T.db.opts.forMe then return false end
     local current = areas[1]
     local anyItems = false
     for _, a in ipairs(areas) do
@@ -3742,6 +3883,7 @@ function P.Render(f)
     for _, row in ipairs(T.rowPool) do
         row:Hide()
     end
+    if not area.isJournal then P.HideJournal(f) end
 
     local pageIdx, pageCount = P.GetAreaIndex(area.key), #P.areas
     local pageStr = (pageCount > 1) and string.format("  ·  page %d of %d", pageIdx, pageCount) or ""
@@ -3750,6 +3892,7 @@ function P.Render(f)
     local st = P.GetStyle()
     if f.styleKey ~= st.key then P.ApplyStyle(f) end
     P.LayoutPads(f)
+    P.LayoutTabs(f)                          -- the Near me / Journal tabs on the right edge (Journal.lua)
     local padL, padT, padR, padB = P.GetPads(f)
     for _, b in pairs(f.quickBtns or {}) do P.DrawQuickButton(b) end      -- in this look's ink
 
@@ -3766,7 +3909,7 @@ function P.Render(f)
     else
         f.titleFS:SetTextColor(st.title[1], st.title[2], st.title[3], 1)
     end
-    if area.isCurrent and area.subtitle and area.subtitle ~= "" then
+    if (area.isCurrent or area.isJournal) and area.subtitle and area.subtitle ~= "" then
         f.titleFS:SetText(title .. "  |c" .. P.Hex(st.sub) .. "· " .. area.subtitle .. "|r")
     else
         f.titleFS:SetText(title)
@@ -3776,6 +3919,14 @@ function P.Render(f)
     local ruleW = math.min(w - 20 - padL - padR, math.max(60, (f.titleFS:GetStringWidth() or 80) + 22))
     P.DrawStroke(f.titleRule, f.chrome, 8 + padL, -25 - padT, 8 + padL + ruleW, -24 - padT, 1.2, 0.70)
     P.DrawStroke(f.titleRule2, f.chrome, 14 + padL, -27.5 - padT, 8 + padL + ruleW * 0.55, -27 - padT, 0.7, 0.40)
+
+    -- the Journal's page (Journal.lua) draws its own notes
+    local pageContentW = math.max(150, w - 12 - padL - padR)
+    local pageContentH = math.max(55, (f:GetHeight() or 175) - 45 - padT - padB)
+    if area.isJournal then
+        P.RenderJournal(f, area, pageContentW, pageContentH, pageStr)
+        return
+    end
 
     if #items == 0 then
         P.HideKindHeadings(f, 1)
@@ -3798,12 +3949,14 @@ function P.Render(f)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", f.content, "TOPLEFT", 0, -2)
         row:SetPoint("TOPRIGHT", f.content, "TOPRIGHT", 0, -2)
-        row:SetHeight(math.max(36, math.ceil(row.itemText:GetStringHeight() or 30) + 6))
+        local msgH = math.max(36, math.ceil(row.itemText:GetStringHeight() or 30) + 6)
+        row:SetHeight(msgH)
         row:SetScript("OnClick", nil)
         row:SetScript("OnEnter", nil)
         row:SetScript("OnLeave", nil)
         row:Show()
         f.footerFS:SetText("nothing here" .. pageStr)
+        P.RenderForMe(f, area, -2 - msgH, pageContentW, pageContentH)      -- your own tasks under it (Near me only)
         return
     end
 
@@ -3811,8 +3964,9 @@ function P.Render(f)
         T.scroll = math.max(0, #items - 1)
     end
 
-    local contentW = math.max(150, w - 12 - padL - padR)
-    local contentH = math.max(55, (f:GetHeight() or 175) - 45 - padT - padB)
+    local contentW, contentH = pageContentW, pageContentH
+    -- on Near me the quest lines leave room for "For me" at the bottom (Journal.lua)
+    local questH = area.isCurrent and (contentH - P.ForMeReserve(f, contentW, contentH, true)) or contentH
     local yCursor = 0
     local shownRows = 0
     P.SetInkFont(f.measureFS, "item")
@@ -3931,7 +4085,7 @@ function P.Render(f)
         local group = P.LineGroup(entry)
         local headH = (heads and group ~= lastGroup) and P.KIND_HEADING_H or 0
 
-        if (math.abs(yCursor) + headH + rowH) > (contentH + 4) and shownRows > 0 then
+        if (math.abs(yCursor) + headH + rowH) > (questH + 4) and shownRows > 0 then
             row:Hide()
             break
         end
@@ -3988,6 +4142,7 @@ function P.Render(f)
     end
 
     P.HideKindHeadings(f, usedHeads + 1)
+    P.RenderForMe(f, area, yCursor, contentW, contentH)       -- your own tasks at the bottom (Near me only)
     local doneCount = area.doneCount or 0
     local verb = P.TallyVerb()
     if #items > shownRows then
@@ -4006,6 +4161,7 @@ T.Update = function()
     end
 
     local areas = P.BuildAreas()
+    if T.db.opts.forMe then table.insert(areas, P.JournalArea()) end     -- the Journal: always the last page
     P.areas = areas
     local current = areas[1]
     P.CheckAreaChange(f)
@@ -4694,6 +4850,42 @@ end
 -- EDIT: size of the map area in pixels (keep roughly 3:2, the shape of zone maps)
 P.PREVIEW_W, P.PREVIEW_H = 220, 147
 
+-- Which way you face on the hover map (from HandkerSheaf): a small gold arrowhead just outside the "you"
+-- dot, turned to GetPlayerFacing and kept up to date while the map is up (P.UpdatePreviewYou). Hidden where
+-- the game won't say (some instances): then the plain dot. textures\facing_arrow is Handkerquest's own
+-- (TexGen FacingArrow).
+P.FACING_ARROW_TEX = P.TEXTURE_DIR .. "facing_arrow"
+P.FACING_ARROW_SIZE = 11      -- px
+P.FACING_ARROW_OFF = 8        -- its middle, px from the dot's middle
+P.FACING_EVERY = 0.03         -- seconds between updates while the map is up
+
+-- The "you" dot where you stand on the preview's map (hidden off it), and the arrow the way you face.
+-- Facing: radians from north, counter-clockwise (as GetPlayerFacing gives it; the map has north up).
+function P.UpdatePreviewYou(pv)
+    if not (pv and pv.mapID and pv.you) then return end
+    local you = pv.you
+    local pMap, px, py = T.PlayerPos()
+    local yx, yy
+    if pMap and px and py then yx, yy = P.TranslatePos(pMap, px, py, pv.mapID) end
+    if not yx then
+        you:Hide()
+        return
+    end
+    you:ClearAllPoints()
+    you:SetPoint("CENTER", pv.child, "TOPLEFT", yx * pv.CW, -yy * pv.CH)
+    you:Show()
+    local fa = T.Call(GetPlayerFacing)                      -- nil (or secret) inside some instances
+    local ar = you.arrow
+    if type(fa) ~= "number" or not ar then
+        if ar then ar:Hide() end
+        return
+    end
+    ar:ClearAllPoints()
+    ar:SetPoint("CENTER", you, "CENTER", -math.sin(fa) * P.FACING_ARROW_OFF, math.cos(fa) * P.FACING_ARROW_OFF)
+    if ar.SetRotation then pcall(ar.SetRotation, ar, fa) end
+    ar:Show()
+end
+
 function T.EnsureMapPreview()
     if T.mapPreview then return T.mapPreview end
     local pv = CreateFrame("Frame", "CRQ_TallyMapPreview", UIParent)
@@ -4755,7 +4947,19 @@ function T.EnsureMapPreview()
     you.dot:SetPoint("TOPLEFT", 1.5, -1.5)
     you.dot:SetPoint("BOTTOMRIGHT", -1.5, 1.5)
     you.dot:SetVertexColor(1.0, 0.92, 0.25, 1)
+    you.arrow = you:CreateTexture(nil, "ARTWORK", nil, 2)
+    you.arrow:SetTexture(P.FACING_ARROW_TEX)
+    you.arrow:SetSize(P.FACING_ARROW_SIZE, P.FACING_ARROW_SIZE)
+    you.arrow:SetVertexColor(1.0, 0.92, 0.25, 1)          -- the dot's gold; its dark rim stays dark
+    you.arrow:Hide()
     pv.you = you
+    -- you turn and walk while the map is up: the dot and arrow follow
+    pv:SetScript("OnUpdate", function(self, elapsed)
+        self.youWait = (self.youWait or 0) - (elapsed or 0)
+        if self.youWait > 0 then return end
+        self.youWait = P.FACING_EVERY
+        T.SafeCall(P.UpdatePreviewYou, self)
+    end)
 
     pv.note = pv:CreateFontString(nil, "OVERLAY")
     pv.note:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
@@ -4850,16 +5054,8 @@ function T.ShowMapPreview(entry, anchor)
     end
     for i = #marks + 1, #child.circles do child.circles[i]:Hide() end
 
-    local pMap, px, py = T.PlayerPos()
-    local yx, yy
-    if pMap and px and py then yx, yy = P.TranslatePos(pMap, px, py, mapID) end
-    if yx then
-        pv.you:ClearAllPoints()
-        pv.you:SetPoint("CENTER", child, "TOPLEFT", yx * CW, -yy * CH)
-        pv.you:Show()
-    else
-        pv.you:Hide()
-    end
+    pv.mapID, pv.CW, pv.CH = mapID, CW, CH
+    P.UpdatePreviewYou(pv)
 
     local info = C_Map and C_Map.GetMapInfo and C_Map.GetMapInfo(mapID)
     pv.title:SetText("|cFFFFD100" .. ((info and info.name) or "Map") .. "|r  |cFFCCCCCC" .. (entry.itemName or "") .. "|r")
@@ -5139,30 +5335,36 @@ end
 function T.BuildOptionsPanel()
     if T.optionsPanel then return T.optionsPanel end
 
-    -- The panel scrolls: it's taller than the Settings window. Everything below is built on the scroll
-    -- child (p); the registered panel is the outer frame.
-    local outer = CreateFrame("Frame", "CRQ_OptionsPanel")
-    outer.name = DISPLAY_NAME
-    outer:Hide()
-    local okS, scroll = pcall(CreateFrame, "ScrollFrame", nil, outer, "UIPanelScrollFrameTemplate")
-    if not okS or not scroll then scroll = CreateFrame("ScrollFrame", nil, outer) end
-    scroll:SetPoint("TOPLEFT", outer, "TOPLEFT", 0, -4)
-    scroll:SetPoint("BOTTOMRIGHT", outer, "BOTTOMRIGHT", -28, 4)
-    scroll:EnableMouseWheel(true)
-    if not scroll.ScrollBar then
-        scroll:SetScript("OnMouseWheel", function(self, delta)
-            local max = math.max(0, (self:GetScrollChild() and self:GetScrollChild():GetHeight() or 0) - (self:GetHeight() or 0))
-            self:SetVerticalScroll(math.max(0, math.min(max, (self:GetVerticalScroll() or 0) - delta * 40)))
-        end)
+    -- A page scrolls: it's taller than the Settings window. Everything is built on the scroll child (p);
+    -- the registered panel is the outer frame. Two pages: the main one and Appearance (a subcategory under
+    -- ours, from HandkerSheaf). The helpers below draw on whatever p / y point at, so the Appearance page is
+    -- built by pointing them at it.
+    local function NewPage(frameName, name)
+        local page = CreateFrame("Frame", frameName)
+        page.name = name
+        page:Hide()
+        local okS, scroll = pcall(CreateFrame, "ScrollFrame", nil, page, "UIPanelScrollFrameTemplate")
+        if not okS or not scroll then scroll = CreateFrame("ScrollFrame", nil, page) end
+        scroll:SetPoint("TOPLEFT", page, "TOPLEFT", 0, -4)
+        scroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -28, 4)
+        scroll:EnableMouseWheel(true)
+        if not scroll.ScrollBar then
+            scroll:SetScript("OnMouseWheel", function(self, delta)
+                local max = math.max(0, (self:GetScrollChild() and self:GetScrollChild():GetHeight() or 0) - (self:GetHeight() or 0))
+                self:SetVerticalScroll(math.max(0, math.min(max, (self:GetVerticalScroll() or 0) - delta * 40)))
+            end)
+        end
+        local child = CreateFrame("Frame", nil, scroll)
+        child:SetSize(560, 900)
+        scroll:SetScrollChild(child)
+        local function Fit()
+            local w = scroll:GetWidth()
+            if w and w > 100 then child:SetWidth(w) end
+        end
+        page:SetScript("OnSizeChanged", Fit)
+        return page, child, Fit
     end
-    local p = CreateFrame("Frame", nil, scroll)
-    p:SetSize(560, 900)
-    scroll:SetScrollChild(p)
-    local function FitWidth()
-        local w = scroll:GetWidth()
-        if w and w > 100 then p:SetWidth(w) end
-    end
-    outer:SetScript("OnSizeChanged", FitWidth)
+    local outer, p, FitWidth = NewPage("CRQ_OptionsPanel", DISPLAY_NAME)
     local y = -16
 
     local title = p:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
@@ -5174,6 +5376,7 @@ function T.BuildOptionsPanel()
     sub:SetPoint("TOPLEFT", p, "TOPLEFT", 16, y)
     sub:SetText("The Field Tally: a handwritten note of the quest items you still have to collect and the tasks still to do.")
     y = y - 26
+    if T.BuildFeedbackRow then y = y - T.BuildFeedbackRow(p, y) end     -- a link to leave comments (Journal.lua)
 
     local function Section(text)
         local fs = p:CreateFontString(nil, "ARTWORK", "GameFontNormal")
@@ -5303,25 +5506,9 @@ function T.BuildOptionsPanel()
 
     local function Redraw() T.SafeCall(T.Update) end
 
-    Section("Field Tally")
-    Check("Show the Field Tally",
-        "The note listing the quest items you still have to collect and the tasks still to do.",
-        function() return T.db.show end,
-        function(v) if v then P.TurnTallyOn() else T.db.show = false; Redraw() end end)
-    -- right under it (it decides whether the tally is up at all), greyed out while the tally is off
-    local hideCb = Check("...only when something is nearby",
-        "On: the tally only appears when the area you're in has something to gather or do, and puts itself away when it doesn't. Off: it stays up so you can leaf through other areas.",
-        function() return T.db.opts.hideWhenNothingNearby end,
-        function(v)
-            T.db.opts.hideWhenNothingNearby = v
-            if T.db.show then P.TurnTallyOn() end      -- says so in chat if this just put it away
-        end, 44)
-    local hideRefresh = hideCb.Refresh
-    hideCb.Refresh = function(self) hideRefresh(self); self:SetAlpha(T.db.show and 1 or 0.45) end
-
     -- Colour swatches (+ Custom... = WoW's colour picker). which = "rune" (Arcane script's rune circle,
-    -- beside the Look button, only while that look is chosen) or "ink" (the writing, every look; each
-    -- look remembers its own). The first swatch is always the look's own colour.
+    -- greyed unless that look is chosen) or "ink" (the writing, every look; each look remembers its own).
+    -- The first swatch is always the look's own colour.
     local function IsArcane() return P.GetStyle().key == "ARCANE" end
     local function OpenColorPicker(which)
         if not ColorPickerFrame then return end
@@ -5350,7 +5537,7 @@ function T.BuildOptionsPanel()
             end
         end)
     end
-    local function ColorRow(x, rowY, labelText, labelW, which, presets, tipBody, shownFn)
+    local function ColorRow(x, rowY, labelText, labelW, which, presets, tipBody, shownFn, enabledFn)
         local row = CreateFrame("Frame", nil, p)
         row:SetSize(labelW + #presets * 22 + 82, 22)
         row:SetPoint("TOPLEFT", p, "TOPLEFT", x, rowY - 1)
@@ -5414,15 +5601,13 @@ function T.BuildOptionsPanel()
             end
             if self.customBtn then self.customBtn:SetText(any and "Custom..." or "Custom •") end
             self:SetShown(not shownFn or shownFn())
+            self:SetAlpha((not enabledFn or enabledFn()) and 1 or 0.45)
         end
         table.insert(T.optionWidgets, row)
         return row
     end
 
-    y = y - 2
-    -- Look: a drop-down list of every look (a little swatch of each, the current one ticked; hover one
-    -- to read about it). Clicking outside the list, or the button again, closes it.
-    -- EDIT: add a line here for every new look in P.STYLES.
+    -- EDIT: add a line here for every new look in P.STYLES, and every new hand in P.FONT_STYLES.
     local LOOK_BLURBS = {
         HANDKERCHIEF = "Written on a lace-edged handkerchief.",
         PARCHMENT = "A pile of torn parchment pages.",
@@ -5435,159 +5620,221 @@ function T.BuildOptionsPanel()
         MARBLE = "A white marble tablet, the list cut in and gilded, glowing with holy light.",
         GILDED = "A plate of beaten gold, the list engraved; light glints across it now and then.",
         VELLUM = "A page of a holy book with a gold-leaf border, the heading in red, its first letter gilded.",
+        DISPATCH = "A courier's message torn off a field pad, folded in four, in copying pencil; stamped with your guild's name if you have one.",
         ARCANE = "A mage's words of light hanging in the air, a rune circle turning behind them.",
         NATIVE = "A see-through WoW-style panel, in the handwriting you pick.",
     }
-    local lookBtn = Button("Look: Torn rag", 210, 24, function(self)
-        if self.list:IsShown() then self.list:Hide() else self.list:Show() end
-    end, function(self)
-        self:SetText("Look: " .. P.GetStyle().label)
-        if self.list and self.list:IsShown() then self.list:Refresh() end
-    end)
-    lookBtn.arrow = lookBtn:CreateTexture(nil, "OVERLAY")
-    lookBtn.arrow:SetSize(16, 16)
-    lookBtn.arrow:SetPoint("RIGHT", lookBtn, "RIGHT", -4, 0)
-    lookBtn.arrow:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
-    lookBtn:SetScript("OnEnter", function(self)
-        if self.list:IsShown() then return end
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:AddLine("Look of the Field Tally", 1, 0.82, 0)
-        GameTooltip:AddLine("Click to pick one from the list.", 0.9, 0.9, 0.9, true)
-        GameTooltip:Show()
-    end)
-    lookBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    local FONT_BLURBS = {
+        QUILL = "Blizzard's calligraphic book hand.",
+        SCRAWL = "A rough, angular scrawl.",
+        PLAIN = "The game's plain interface print.",
+        BLOTTED = "A rough hand, drops of ink shaken off the quill here and there.",
+        TYPEWRITER = "Typed on a worn field typewriter: uneven, inky keys. Made for the courier dispatch.",
+    }
 
-    local ROW_H = 20
-    -- Layers: the list sits above everything (FULLSCREEN_DIALOG), the click-catcher just under it (DIALOG,
-    -- still above the Settings window). Set again every time the list opens: when Settings shows our panel
-    -- it re-parents it, which pulls the list back down to the window's layer, under the catcher, and every
-    -- click on a look would then only close the list.
-    local list = CreateFrame("Frame", nil, lookBtn)
-    list:SetFrameStrata("FULLSCREEN_DIALOG")
-    list:SetToplevel(true)
-    list:EnableMouse(true)
-    list:SetPoint("TOPLEFT", lookBtn, "BOTTOMLEFT", 0, -2)
-    list:SetSize(230, #P.STYLES * ROW_H + 10)
-    list.bg = list:CreateTexture(nil, "BACKGROUND")
-    list.bg:SetAllPoints()
-    list.bg:SetColorTexture(0.06, 0.05, 0.04, 0.96)
-    for _, edge in ipairs({ { "TOPLEFT", "TOPRIGHT", 0, 1 }, { "BOTTOMLEFT", "BOTTOMRIGHT", 0, 1 },
-                            { "TOPLEFT", "BOTTOMLEFT", 1, 0 }, { "TOPRIGHT", "BOTTOMRIGHT", 1, 0 } }) do
-        local t = list:CreateTexture(nil, "BORDER")
-        t:SetColorTexture(0.6, 0.5, 0.2, 0.8)
-        t:SetPoint(edge[1], list, edge[1], 0, 0)
-        t:SetPoint(edge[2], list, edge[2], 0, 0)
-        if edge[3] == 1 then t:SetWidth(1) else t:SetHeight(1) end
-    end
-    list:Hide()
-    -- a click anywhere else closes the list
-    local catcher = CreateFrame("Button", nil, UIParent)
-    catcher:SetAllPoints(UIParent)
-    catcher:SetFrameStrata("DIALOG")
-    catcher:SetFrameLevel(1)
-    catcher:RegisterForClicks("AnyUp")
-    catcher:SetScript("OnClick", function()
-        -- if a click still lands here over a look (layers changed under us), pick that look
-        for _, row in ipairs(list.rows or {}) do
-            if row:IsShown() and row:IsMouseOver() then row:GetScript("OnClick")(row); return end
+    -- A drop-down list under a button (from HandkerSheaf): one row per entry (the current one ticked, an
+    -- optional swatch, the label in the entry's own font if it has one), a blurb on hover; a click outside
+    -- closes it. Layers: the list sits above everything (FULLSCREEN_DIALOG), the click-catcher just under it
+    -- (DIALOG, still above the Settings window). Set again every time the list opens: when Settings shows our
+    -- panel it re-parents it, which pulls the list back down to the window's layer, under the catcher, and
+    -- every click on a row then only closed the list. host = the page's outer frame (hiding it closes the list).
+    local function DropList(btn, entries, width, getCur, onPick, tipTitle, host)
+        local ROW_H = 20
+        btn.arrow = btn:CreateTexture(nil, "OVERLAY")
+        btn.arrow:SetSize(16, 16)
+        btn.arrow:SetPoint("RIGHT", btn, "RIGHT", -4, 0)
+        btn.arrow:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+        btn:SetScript("OnEnter", function(self)
+            if self.list:IsShown() then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(tipTitle, 1, 0.82, 0)
+            GameTooltip:AddLine("Click to pick one from the list.", 0.9, 0.9, 0.9, true)
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        local list = CreateFrame("Frame", nil, btn)
+        list:SetFrameStrata("FULLSCREEN_DIALOG")
+        list:SetToplevel(true)
+        list:EnableMouse(true)
+        list:SetPoint("TOPLEFT", btn, "BOTTOMLEFT", 0, -2)
+        list:SetSize(width, #entries * ROW_H + 10)
+        list.bg = list:CreateTexture(nil, "BACKGROUND")
+        list.bg:SetAllPoints()
+        list.bg:SetColorTexture(0.06, 0.05, 0.04, 0.96)
+        for _, edge in ipairs({ { "TOPLEFT", "TOPRIGHT", 0, 1 }, { "BOTTOMLEFT", "BOTTOMRIGHT", 0, 1 },
+                                { "TOPLEFT", "BOTTOMLEFT", 1, 0 }, { "TOPRIGHT", "BOTTOMRIGHT", 1, 0 } }) do
+            local t = list:CreateTexture(nil, "BORDER")
+            t:SetColorTexture(0.6, 0.5, 0.2, 0.8)
+            t:SetPoint(edge[1], list, edge[1], 0, 0)
+            t:SetPoint(edge[2], list, edge[2], 0, 0)
+            if edge[3] == 1 then t:SetWidth(1) else t:SetHeight(1) end
         end
         list:Hide()
-    end)
-    catcher:Hide()
-    list:SetFrameLevel(catcher:GetFrameLevel() + 5)
-    list.rows = {}
-    for k, st in ipairs(P.STYLES) do
-        local row = CreateFrame("Button", nil, list)
-        row:SetSize(222, ROW_H)
-        row:SetPoint("TOPLEFT", list, "TOPLEFT", 4, -5 - (k - 1) * ROW_H)
-        row.hl = row:CreateTexture(nil, "HIGHLIGHT")
-        row.hl:SetAllPoints()
-        row.hl:SetColorTexture(1, 0.82, 0, 0.15)
-        row.tick = row:CreateTexture(nil, "ARTWORK")
-        row.tick:SetSize(14, 14)
-        row.tick:SetPoint("LEFT", row, "LEFT", 2, 0)
-        row.tick:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
-        row.swatch = row:CreateTexture(nil, "ARTWORK")
-        row.swatch:SetSize(16, 16)
-        row.swatch:SetPoint("LEFT", row, "LEFT", 20, 0)
-        if st.image then
-            row.swatch:SetTexture(st.image)
-            row.swatch:SetTexCoord(0.25, 0.75, 0.25, 0.75)          -- the middle of the material
-        else
-            local c = st.paper
-            row.swatch:SetColorTexture(c[1], c[2], c[3], math.max(c[4] or 1, 0.6))
-        end
-        row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        row.label:SetPoint("LEFT", row.swatch, "RIGHT", 6, 0)
-        row.label:SetText(st.label)
-        row.key = st.key
-        row:SetScript("OnClick", function(self)
-            T.db.look = self.key
+        -- a click anywhere else closes the list
+        local catcher = CreateFrame("Button", nil, UIParent)
+        catcher:SetAllPoints(UIParent)
+        catcher:SetFrameStrata("DIALOG")
+        catcher:SetFrameLevel(1)
+        catcher:RegisterForClicks("AnyUp")
+        catcher:SetScript("OnClick", function()
+            -- if a click still lands here over a row (layers changed under us), pick that row
+            for _, row in ipairs(list.rows or {}) do
+                if row:IsShown() and row:IsMouseOver() then row:GetScript("OnClick")(row); return end
+            end
             list:Hide()
+        end)
+        catcher:Hide()
+        list:SetFrameLevel(catcher:GetFrameLevel() + 5)
+        list.rows = {}
+        for k, en in ipairs(entries) do
+            local row = CreateFrame("Button", nil, list)
+            row:SetSize(width - 8, ROW_H)
+            row:SetPoint("TOPLEFT", list, "TOPLEFT", 4, -5 - (k - 1) * ROW_H)
+            row.hl = row:CreateTexture(nil, "HIGHLIGHT")
+            row.hl:SetAllPoints()
+            row.hl:SetColorTexture(1, 0.82, 0, 0.15)
+            row.tick = row:CreateTexture(nil, "ARTWORK")
+            row.tick:SetSize(14, 14)
+            row.tick:SetPoint("LEFT", row, "LEFT", 2, 0)
+            row.tick:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+            local labelAt = 20
+            if en.image or en.color then
+                row.swatch = row:CreateTexture(nil, "ARTWORK")
+                row.swatch:SetSize(16, 16)
+                row.swatch:SetPoint("LEFT", row, "LEFT", 20, 0)
+                if en.image then
+                    row.swatch:SetTexture(en.image)
+                    row.swatch:SetTexCoord(0.25, 0.75, 0.25, 0.75)          -- the middle of the material
+                else
+                    local c = en.color
+                    row.swatch:SetColorTexture(c[1], c[2], c[3], math.max(c[4] or 1, 0.6))
+                end
+                labelAt = 42
+            end
+            row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            row.label:SetPoint("LEFT", row, "LEFT", labelAt, 0)
+            if en.font then pcall(row.label.SetFont, row.label, en.font, en.fontSize or 14, "") end   -- a sample of the hand
+            row.label:SetText(en.label)
+            row.key = en.key
+            row:SetScript("OnClick", function(self)
+                list:Hide()
+                onPick(self.key)
+                T.RefreshOptionsPanel()
+            end)
+            row:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(list, "ANCHOR_RIGHT")
+                GameTooltip:AddLine(en.label, 1, 0.82, 0)
+                if en.blurb then GameTooltip:AddLine(en.blurb, 0.9, 0.9, 0.9, true) end
+                GameTooltip:Show()
+            end)
+            row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            list.rows[k] = row
+        end
+        list.Refresh = function(self)
+            local cur = getCur()
+            for _, row in ipairs(self.rows) do
+                row.tick:SetShown(row.key == cur)
+                row.label:SetTextColor(1, row.key == cur and 0.82 or 1, row.key == cur and 0 or 1)
+            end
+        end
+        list:SetScript("OnShow", function(self)
+            catcher:SetFrameStrata("DIALOG")
+            catcher:Show()
+            self:SetFrameStrata("FULLSCREEN_DIALOG")
+            self:Raise()
+            self:Refresh()
+            GameTooltip:Hide()
+        end)
+        list:SetScript("OnHide", function() catcher:Hide() end)
+        btn.list = list
+        list.catcher = catcher
+        host:HookScript("OnHide", function() list:Hide() end)
+        return list
+    end
+    local function ToggleList(self) if self.list:IsShown() then self.list:Hide() else self.list:Show() end end
+
+    -- The tally's look, handwriting, colours and size: first on the main page (seen without scrolling) and
+    -- again on the Appearance page. One function builds both on whatever page p / y point at; host = that
+    -- page's outer frame. Returns the widgets.
+    local function BuildAppearance(host)
+        local W = {}
+        Section("Appearance")
+        local lookEntries = {}
+        for _, st in ipairs(P.STYLES) do
+            table.insert(lookEntries, { key = st.key, label = st.label, image = st.image, color = (not st.image) and st.paper or nil,
+                blurb = LOOK_BLURBS[st.key] })
+        end
+        W.lookBtn = Button("Look: Torn rag", 210, 24, ToggleList, function(self)
+            self:SetText("Look: " .. P.GetStyle().label)
+            if self.list and self.list:IsShown() then self.list:Refresh() end
+        end)
+        W.lookList = DropList(W.lookBtn, lookEntries, 230, function() return P.GetStyle().key end, function(key)
+            T.db.look = key
             T.Save()
             P.ApplyStyle()
             Redraw()
-            T.RefreshOptionsPanel()
-        end)
-        row:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(list, "ANCHOR_RIGHT")
-            GameTooltip:AddLine(st.label, 1, 0.82, 0)
-            if LOOK_BLURBS[st.key] then GameTooltip:AddLine(LOOK_BLURBS[st.key], 0.9, 0.9, 0.9, true) end
-            GameTooltip:Show()
-        end)
-        row:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        list.rows[k] = row
-    end
-    list.Refresh = function(self)
-        local cur = P.GetStyle().key
-        for _, row in ipairs(self.rows) do
-            row.tick:SetShown(row.key == cur)
-            row.label:SetTextColor(1, row.key == cur and 0.82 or 1, row.key == cur and 0 or 1)
+        end, "Look of the Field Tally", host)
+        local fontEntries = {}
+        for _, fst in ipairs(P.FONT_STYLES) do
+            table.insert(fontEntries, { key = fst.key, label = fst.label, font = fst.path or STANDARD_TEXT_FONT,
+                fontSize = (fst.item or 12) + 2, blurb = FONT_BLURBS[fst.key] })
         end
+        W.fontBtn = Button("Handwriting: Quill script", 240, 244, ToggleList, function(self)
+            -- carved bark brings its own lettering (knife-cut letters)
+            local forced = P.GetStyle().font
+            local label = P.GetFontStyle().label
+            if forced then
+                for _, fst in ipairs(P.FONT_STYLES) do if fst.key == forced then label = fst.label .. " (set by the look)" end end
+            end
+            self:SetText("Handwriting: " .. label)
+            self:SetAlpha(forced and 0.45 or 1)
+            if self.list and self.list:IsShown() then self.list:Refresh() end
+        end)
+        W.fontList = DropList(W.fontBtn, fontEntries, 230, function() return P.GetFontStyle().key end, function(key)
+            T.db.font = key
+            T.Save()
+            Redraw()
+        end, "Handwriting", host)
+        y = y - 30
+        -- every look; each look remembers its own
+        W.ink = ColorRow(24, y, "Writing colour", 110, "ink", P.INK_COLORS,
+            "The colour of the tally's writing: the lines, heading and footer. Each look remembers its own; the first swatch is the look's own ink.")
+        y = y - 26
+        -- always there (so nothing jumps about), greyed unless Arcane script is the look
+        W.runes = ColorRow(24, y, "Rune colour", 110, "rune", P.ARCANE_RUNE_COLORS,
+            "Arcane script only: the colour of the rune circle and its light (the glow round the words, the motes, ticks and strikes, the corner mark).",
+            nil, IsArcane)
+        y = y - 28
+        W.size = RadiusSlider("Text size",
+            "How big the tally's writing is, as % of the usual size. The page heading grows by half as much.",
+            function() return T.db.textScale or 100 end,
+            function(v) T.db.textScale = v; T.Save(); Redraw() end,
+            nil, nil, P.TEXT_SCALE_MIN, P.TEXT_SCALE_MAX)
+        y = y - 4
+        return W
     end
-    list:SetScript("OnShow", function(self)
-        catcher:SetFrameStrata("DIALOG")
-        catcher:Show()
-        self:SetFrameStrata("FULLSCREEN_DIALOG")
-        self:Raise()
-        self:Refresh()
-        GameTooltip:Hide()
-    end)
-    list:SetScript("OnHide", function() catcher:Hide() end)
-    lookBtn.list = list
-    list.catcher = catcher
-    T.lookDropDown = list
-    outer:HookScript("OnHide", function() list:Hide() end)
-    -- beside the Look button, only while Arcane script is the look
-    T.runeColorRow = ColorRow(244, y, "Runes", 42, "rune", P.ARCANE_RUNE_COLORS,
-        "Arcane script: the colour of the rune circle and its light (the glow round the words, the motes, ticks and strikes, the corner mark).",
-        IsArcane)
-    y = y - 28
-    local fontBtn = Button("Handwriting: Quill script", 210, 24, function()
-        P.CycleFontStyle(); T.Save(); Redraw()
-    end, function(self)
-        -- carved bark brings its own lettering (knife-cut letters)
-        local forced = P.GetStyle().font
-        local label = P.GetFontStyle().label
-        if forced then
-            for _, fst in ipairs(P.FONT_STYLES) do if fst.key == forced then label = fst.label .. " (set by the look)" end end
-        end
-        self:SetText("Handwriting: " .. label)
-        self:SetAlpha(forced and 0.45 or 1)
-    end)
-    Tip(fontBtn, "Handwriting", "Quill script (Morpheus), rough scrawl (Skurri), plain print, or blotted scrawl (a bolder rough hand with ink spattered off the quill). Carved bark brings its own knife-cut lettering.")
-    y = y - 30
 
-    -- every look; each look remembers its own
-    T.inkColorRow = ColorRow(24, y, "Writing colour", 128, "ink", P.INK_COLORS,
-        "The colour of the tally's writing: the lines, heading and footer. Each look remembers its own; the first swatch is the look's own ink.")
-    y = y - 32
+    -- Appearance first: what most people come here to change, seen without scrolling
+    local mainAp = BuildAppearance(outer)
+    T.lookDropDown, T.fontDropDown = mainAp.lookList, mainAp.fontList
+    T.inkColorRow, T.runeColorRow, T.textSizeRow = mainAp.ink, mainAp.runes, mainAp.size
 
-    T.textSizeRow = RadiusSlider("Text size",
-        "How big the tally's writing is, as % of the usual size. The page heading grows by half as much.",
-        function() return T.db.textScale or 100 end,
-        function(v) T.db.textScale = v; T.Save(); Redraw() end,
-        nil, nil, P.TEXT_SCALE_MIN, P.TEXT_SCALE_MAX)
+    Section("Field Tally")
+    Check("Show the Field Tally",
+        "The note listing the quest items you still have to collect and the tasks still to do.",
+        function() return T.db.show end,
+        function(v) if v then P.TurnTallyOn() else T.db.show = false; Redraw() end end)
+    -- right under it (it decides whether the tally is up at all), greyed out while the tally is off
+    local hideCb = Check("...only when something is nearby",
+        "On: the tally only appears when the area you're in has something to gather or do, and puts itself away when it doesn't. Off: it stays up so you can leaf through other areas.\n\nWhile \"For me\" is on, the tally stays up whenever it's switched on (your tasks and Ledger are on it), so this only counts with \"For me\" off.",
+        function() return T.db.opts.hideWhenNothingNearby end,
+        function(v)
+            T.db.opts.hideWhenNothingNearby = v
+            if T.db.show then P.TurnTallyOn() end      -- says so in chat if this just put it away
+        end, 44)
+    local hideRefresh = hideCb.Refresh
+    -- also greyed while "For me" is on: then the tally is never put away (P.ShouldHideTally)
+    hideCb.Refresh = function(self) hideRefresh(self); self:SetAlpha((T.db.show and not T.db.opts.forMe) and 1 or 0.45) end
 
     RadiusSlider("Near me distance",
         "Page 1 lists quest items and tasks within this distance of where you're standing (as % of the zone map), plus anything you've progressed in the last 3 minutes.",
@@ -5664,6 +5911,13 @@ function T.BuildOptionsPanel()
         function() return T.db.opts.trackerGear end,
         function(v) T.db.opts.trackerGear = v; T.EnsureTrackerGear(); T.UpdateTrackerGear() end)
 
+    -- "For me" tasks, the Journal and its auto notes (Journal.lua)
+    if T.BuildJournalOptions then
+        y = y - 4
+        T.BuildJournalOptions({ Section = Section, Check = Check,
+            GetY = function() return y end, SetY = function(v) y = v end })
+    end
+
     y = y - 6
     Button("Reset Position & Size", 170, 24, function()
         T.ResetShoppingListPosition()
@@ -5675,12 +5929,35 @@ function T.BuildOptionsPanel()
     hint:SetPoint("TOPLEFT", p, "TOPLEFT", 20, y)
     hint:SetPoint("RIGHT", p, "RIGHT", -24, 0)
     hint:SetJustifyH("LEFT")
-    hint:SetText("Slash: /crq (options), /crq tally, /crq look [handkerchief|parchment|crumpled|rag|slate|bark|leaf|leather|marble|gilded|vellum|arcane|window], /crq reset, /crq debug")
+    hint:SetText("Slash: /crq (options), /crq tally, /crq appearance, /crq look [handkerchief|parchment|crumpled|rag|slate|bark|leaf|leather|marble|gilded|vellum|dispatch|arcane|window], /crq reset, /crq debug, /crq ledger, /crq note <text>, /crq task <text>, /crq feedback")
     y = y - 30
 
     p:SetHeight(math.abs(y) + 20)
-    outer:SetScript("OnShow", function() FitWidth(); T.RefreshOptionsPanel() end)
+    local mainFit = FitWidth                   -- (FitWidth is pointed at the Appearance page below)
+    outer:SetScript("OnShow", function() mainFit(); T.RefreshOptionsPanel() end)
     T.optionsPanel = outer
+
+    -- ---------------------------------------------------------------- the Appearance page (subcategory)
+    -- The same controls on a page of their own: the helpers draw on whatever p / y are.
+    local apOuter
+    apOuter, p, FitWidth = NewPage("CRQ_AppearancePanel", "Appearance")
+    y = -16
+    local apTitle = p:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    apTitle:SetPoint("TOPLEFT", p, "TOPLEFT", 16, y)
+    apTitle:SetText(DISPLAY_NAME .. ": Appearance")
+    local backBtn = Button("< Main options", 120, 0, function() T.OpenOptions() end)
+    backBtn:ClearAllPoints()
+    backBtn:SetPoint("TOPRIGHT", p, "TOPRIGHT", -24, y + 2)
+    y = y - 22
+    local apSub = p:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    apSub:SetPoint("TOPLEFT", p, "TOPLEFT", 16, y)
+    apSub:SetText("How the Field Tally looks: the material, the handwriting, its colour and size.")
+    y = y - 26
+    T.appearancePageWidgets = BuildAppearance(apOuter)
+    p:SetHeight(math.abs(y) + 40)
+    local apFit = FitWidth
+    apOuter:SetScript("OnShow", function() apFit(); T.RefreshOptionsPanel() end)
+    T.appearancePanel = apOuter
     return outer
 end
 
@@ -5691,10 +5968,34 @@ function T.RegisterOptions()
     if Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
         local ok, category = pcall(Settings.RegisterCanvasLayoutCategory, p, DISPLAY_NAME)
         if ok and category then
+            -- the Appearance page: a subcategory under ours in the Settings list
+            if Settings.RegisterCanvasLayoutSubcategory and T.appearancePanel then
+                local okSub, sub = pcall(Settings.RegisterCanvasLayoutSubcategory, category, T.appearancePanel, "Appearance")
+                if okSub and sub then T.appearanceCategory = sub end
+            end
             pcall(Settings.RegisterAddOnCategory, category)
             T.optionsCategory = category
         end
     end
+end
+
+-- Opens the Appearance page (its subcategory in Settings); the main page if this client can't
+function T.OpenAppearance()
+    T.RegisterOptions()
+    local sub = T.appearanceCategory
+    if not (sub and Settings and Settings.OpenToCategory) or InCombatLockdown() then return T.OpenOptions() end
+    local id = (sub.GetID and sub:GetID()) or sub.ID
+    local ok = pcall(Settings.OpenToCategory, id)
+    -- some clients only open top-level categories by ID: then pick the subcategory in the open window
+    if SettingsPanel and SettingsPanel.SelectCategory and SettingsPanel.GetCurrentCategory then
+        local okCur, cur = pcall(SettingsPanel.GetCurrentCategory, SettingsPanel)
+        if not (okCur and cur == sub) then
+            if not ok then T.OpenOptions() end
+            pcall(SettingsPanel.SelectCategory, SettingsPanel, sub)
+            ok = true
+        end
+    end
+    if not ok then T.OpenOptions() end
 end
 
 -- The Settings panel can't be opened by an addon in combat: it opens once combat ends
@@ -5827,6 +6128,8 @@ SlashCmdList["CACHEREQUEST"] = function(msg)
         T.SafeCall(P.TurnTallyOn)
         T.Save()
         T.RefreshOptionsPanel()
+    elseif cmd == "appearance" or cmd == "app" then
+        T.OpenAppearance()
     elseif cmd == "debug" or cmd == "items" then
         T.DebugDump()
     elseif cmd == "look" or cmd == "style" or string.find(cmd, "^look ") or string.find(cmd, "^style ") then
@@ -5839,6 +6142,7 @@ SlashCmdList["CACHEREQUEST"] = function(msg)
             marble = "MARBLE", sanctified = "MARBLE", tablet = "MARBLE", holy = "MARBLE",
             gilded = "GILDED", gold = "GILDED", plate = "GILDED", golden = "GILDED",
             vellum = "VELLUM", illuminated = "VELLUM", book = "VELLUM", manuscript = "VELLUM",
+            dispatch = "DISPATCH", courier = "DISPATCH", message = "DISPATCH", despatch = "DISPATCH", orders = "DISPATCH",
             arcane = "ARCANE", mage = "ARCANE", magic = "ARCANE", rune = "ARCANE", runes = "ARCANE",
             window = "NATIVE", transparent = "NATIVE", native = "NATIVE" }
         if want and alias[want] then T.db.look = alias[want] else P.CycleStyle() end
@@ -5858,7 +6162,7 @@ end
 local loader = CreateFrame("Frame")
 for _, e in ipairs({ "ADDON_LOADED", "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT", "QUEST_LOG_UPDATE", "UNIT_QUEST_LOG_CHANGED",
     "QUEST_ACCEPTED", "QUEST_REMOVED", "QUEST_TURNED_IN", "SUPER_TRACKING_CHANGED", "ZONE_CHANGED", "ZONE_CHANGED_INDOORS",
-    "ZONE_CHANGED_NEW_AREA", "PLAYER_TARGET_CHANGED", "PLAYER_REGEN_ENABLED", "LOOT_OPENED" }) do
+    "ZONE_CHANGED_NEW_AREA", "PLAYER_TARGET_CHANGED", "PLAYER_REGEN_ENABLED", "LOOT_OPENED", "PLAYER_GUILD_UPDATE" }) do
     loader:RegisterEvent(e)
 end
 
@@ -5908,6 +6212,9 @@ function T.OnEvent(self, event, arg1)
         T.afterCombat = nil
         if after and after.options then T.OpenOptions() end
         if after and after.questID then T.OpenQuestLog(after.questID) end
+    elseif event == "PLAYER_GUILD_UPDATE" then
+        -- joined, left or renamed: the courier dispatch's stamp carries the guild's name
+        if T.frame then T.SafeCall(P.LayoutStamp, T.frame) end
     elseif event == "LOOT_OPENED" then
         T.SafeCall(T.OnLootOpened)
     elseif event == "PLAYER_TARGET_CHANGED" then

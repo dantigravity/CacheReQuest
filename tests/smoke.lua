@@ -22,8 +22,9 @@ for line in string.gmatch(toc, "[^\r\n]+") do
     if sv then svAccount = sv elseif svc then svChar = svc
     elseif not line:match("^##") and line:match("%S") then table.insert(files, (line:gsub("%s+$", ""))) end
 end
-check(files[1] == "CacheReQuest.lua" and files[2] == "FieldTally.lua", "TOC loads CacheReQuest.lua, then FieldTally.lua")
-check(svAccount == "CRQ_TallyKnowledge", "TOC declares the account-wide CRQ_TallyKnowledge")
+check(files[1] == "CacheReQuest.lua" and files[2] == "FieldTally.lua" and files[3] == "Journal.lua",
+    "TOC loads CacheReQuest.lua, then FieldTally.lua, then Journal.lua")
+check(svAccount == "CRQ_TallyKnowledge, CRQ_Notes", "TOC declares the account-wide CRQ_TallyKnowledge and CRQ_Notes")
 check(svChar == "QRF_SavedState", "TOC keeps the per-character QRF_SavedState")
 
 local ns = {}
@@ -128,8 +129,15 @@ check(f and f:IsShown(), "tally shown when there are items to collect nearby")
 check(type(QRF_SavedState) == "table" and QRF_SavedState.fieldTally == T.db, "settings stored in QRF_SavedState.fieldTally")
 check(type(CRQ_TallyKnowledge) == "table" and CRQ_TallyKnowledge.spots == T.K.spots, "loot knowledge stored in CRQ_TallyKnowledge")
 check(T.db.opts.tallyLoot and T.db.opts.tallyTasks and not T.db.opts.tallySeparate, "new characters list items and tasks, together")
+check(T.db.opts.forMe and T.db.opts.autoLevels and not T.db.opts.autoAchievements and not T.db.opts.autoQuests
+    and not T.db.opts.shareTasks and not T.db.opts.shareJournal,
+    "new characters: For me + Journal on, level-up notes on, achievement / quest notes and sharing off")
 -- the item tests below were written for an items-only tally; the tasks block near the end switches tasks on
 T.db.opts.tallyTasks = false
+-- "For me" and the Journal are tested on their own near the end: off here (and in the defaults, as the older
+-- checks reload the settings) so the older checks keep their room and their pages
+T.db.opts.forMe = false
+T.DEFAULTS.opts.forMe = false
 Refresh("ZONE_CHANGED")
 
 -- 1) Only "collect an item" objectives
@@ -612,14 +620,18 @@ local cpt2, _, _, ncx, ncy = f.corner:GetPoint(1)
 check(ncx == 3 and ncy == -3, "the page corner goes back to the frame's corner")
 local styleKeys = {}
 for _, s in ipairs(P.STYLES) do styleKeys[#styleKeys + 1] = s.key end
-check(table.concat(styleKeys, ",") == "HANDKERCHIEF,PARCHMENT,CRUMPLED,RAG,STONE,BARK,LEAF,LEATHER,MARBLE,GILDED,VELLUM,ARCANE,NATIVE", "thirteen looks, in cycle order")
+check(table.concat(styleKeys, ",") == "HANDKERCHIEF,PARCHMENT,CRUMPLED,RAG,STONE,BARK,LEAF,LEATHER,MARBLE,GILDED,VELLUM,DISPATCH,ARCANE,NATIVE", "fourteen looks, in cycle order")
 SlashCmdList["CACHEREQUEST"]("look handkerchief")
 check(T.db.look == "HANDKERCHIEF" and f.styleKey == "HANDKERCHIEF", "/crq look handkerchief")
 local fonts = {}
-for _ = 1, 4 do P.CycleFontStyle(); fonts[#fonts + 1] = T.db.font end
-check(table.concat(fonts, ",") == "SCRAWL,PLAIN,BLOTTED,QUILL", "handwriting cycles quill > scrawl > plain > blotted")
-check(P.FONT_STYLES[1].path == "Fonts\\MORPHEUS.TTF" and P.FONT_STYLES[2].path == "Fonts\\SKURRI.TTF", "built-in client fonts only")
--- the source names one addon folder (P.TEXTURE_DIR), and every image look points at a file that exists
+for _ = 1, 5 do P.CycleFontStyle(); fonts[#fonts + 1] = T.db.font end
+check(table.concat(fonts, ",") == "SCRAWL,PLAIN,BLOTTED,TYPEWRITER,QUILL", "handwriting cycles quill > scrawl > plain > blotted > typewriter")
+check(P.FONT_STYLES[1].path == "Fonts\\MORPHEUS.TTF" and P.FONT_STYLES[2].path == "Fonts\\SKURRI.TTF", "built-in client fonts, plus...")
+check(P.FONT_STYLES[5].path == "Interface\\AddOns\\CacheReQuest\\fonts\\SpecialElite-Regular.ttf"
+    and FileExists(root .. "/fonts/SpecialElite-Regular.ttf") and FileExists(root .. "/fonts/LICENSE-SpecialElite.txt"),
+    "...the Typewriter font shipped in fonts\\, with its licence")
+-- the source names the addon folder twice (P.TEXTURE_DIR, the Typewriter font), and every image look (and
+-- the dispatch's stamp) points at a file that exists
 local refs, s = 0, 1
 while true do
     local a, b = addonSrc:find("Interface\\\\AddOns", s, true)
@@ -632,8 +644,12 @@ for _, st in ipairs(P.STYLES) do
         local rel = st.image:gsub("^Interface\\AddOns\\CacheReQuest\\", ""):gsub("\\", "/")
         if not FileExists(root .. "/" .. rel .. ".tga") then imagesExist = false end
     end
+    if st.stamp then
+        local rel = st.stamp.image:gsub("^Interface\\AddOns\\CacheReQuest\\", ""):gsub("\\", "/")
+        if not FileExists(root .. "/" .. rel .. ".tga") then imagesExist = false end
+    end
 end
-check(refs == 1 and imagesExist and not addonSrc:find("%.blp"), "the only art files are the images in this addon's textures folder")
+check(refs == 2 and imagesExist and not addonSrc:find("%.blp"), "the only art files are the images in this addon's textures folder")
 
 -- 14) Default position above the chat tabs; recomputed after Edit Mode
 local pt, _, relPt, defX, defY = f:GetPoint(1)
@@ -708,7 +724,15 @@ for _, want in ipairs({ "Show the Field Tally", "Look:", "Handwriting:", "Pages 
 end
 local sliders = 0
 for _, w in ipairs(T.optionWidgets) do if w.slider then sliders = sliders + 1 end end
-check(sliders == 3, "options have Text size, Near me distance and cluster-size sliders")
+check(sliders == 4, "options have Text size (main page and Appearance page), Near me distance and cluster-size sliders")
+-- appearance first (from HandkerSheaf): the Look and Handwriting drop-downs come before the tally's switches
+local lookBtnY, showY = T.lookDropDown:GetParent().__py, nil
+for _, w in ipairs(T.optionWidgets) do if w.label and w.label.__text == "Show the Field Tally" then showY = w.__py end end
+check(lookBtnY and showY and lookBtnY > showY and T.fontDropDown:GetParent().__py == lookBtnY,
+    "options: Appearance first, Look and Handwriting side by side")
+check(T.appearancePanel and T.appearancePageWidgets and T.appearancePageWidgets.lookList ~= T.lookDropDown
+    and SETTINGS_SUB and SETTINGS_SUB.panel == T.appearancePanel and SETTINGS_SUB.parent == SETTINGS_CAT,
+    "options: the same controls again on an Appearance page under ours in Settings")
 local showCb
 for _, w in ipairs(T.optionWidgets) do if w.label and w.label.__text == "Show the Field Tally" then showCb = w end end
 showCb:SetChecked(false); showCb:GetScript("OnClick")(showCb)
@@ -1098,11 +1122,25 @@ end)()
     P.SetTallyColor("rune", nil)
     check(P.SameColor(P.GetStyle().arcane.ringColor, P.ARCANE_RUNE_COLORS[1].c), "rune colour: back to violet")
 
-    -- options: Runes only while Arcane script is the look; Writing colour always
+    -- options: Rune colour always there (nothing jumps about), live only while Arcane script is the look
     T.RefreshOptionsPanel()
-    check(T.runeColorRow and T.runeColorRow.__shown and T.inkColorRow and T.inkColorRow.__shown, "options: Runes and Writing colour rows while arcane")
+    check(T.runeColorRow and T.runeColorRow.__shown and T.runeColorRow.__alpha == 1 and T.inkColorRow and T.inkColorRow.__shown,
+        "options: Rune and Writing colour rows while arcane")
     SlashCmdList["CACHEREQUEST"]("look leather")
-    check(not T.runeColorRow.__shown and T.inkColorRow.__shown, "options: Runes hidden for other looks")
+    check(T.runeColorRow.__shown and T.runeColorRow.__alpha < 1 and T.inkColorRow.__shown, "options: Rune colour greyed for other looks")
+
+    -- Handwriting drop-down: one row per hand, each written in itself; picking one switches and closes it
+    local fdd = T.fontDropDown
+    check(fdd and #fdd.rows == #P.FONT_STYLES and fdd.rows[1].label.__font and fdd.rows[1].label.__font[1] == "Fonts\\MORPHEUS.TTF",
+        "handwriting list: one row per hand, written in that hand")
+    local fbtn = fdd:GetParent()
+    fbtn:GetScript("OnClick")(fbtn)
+    local typeRow
+    for _, r in ipairs(fdd.rows) do if r.key == "TYPEWRITER" then typeRow = r end end
+    typeRow:GetScript("OnClick")(typeRow)
+    check(T.db.font == "TYPEWRITER" and not fdd.__shown and fbtn.__text == "Handwriting: Typewriter"
+        and f.titleFS.__font[1]:find("SpecialElite", 1, true), "handwriting list: picking Typewriter switches the tally's writing and closes it")
+    T.db.font = "QUILL"; T.Save(); Refresh("ZONE_CHANGED"); T.RefreshOptionsPanel()
 
     -- Look drop-down: one row per look with a swatch, the current one ticked; picking one closes it
     local dd = T.lookDropDown
@@ -1233,6 +1271,363 @@ TICKER()
     check(C.QuestBlockHasItemButton(e[1]) and not C.QuestBlockHasItemButton(e[2]), "an unfinished quest with an item always has its button")
     GetQuestLogSpecialItemInfo = real
 end)()
+-- ---------------------------------------------------------------------------
+-- 30) "For me" tasks, the Journal, its tabs, search and calendar, and the auto notes (Journal.lua, ported
+-- from HandkerSheaf). A function of its own: the main chunk is near Lua's 200-local limit.
+-- ---------------------------------------------------------------------------
+;(function()
+    local fw0, fh0 = f:GetWidth(), f:GetHeight()
+    T.DEFAULTS.opts.forMe = true
+    T.db.opts.forMe, T.db.opts.tallyTasks, T.db.opts.hideWhenNothingNearby = true, false, false
+    T.db.show, T.db.look, T.db.font = true, "RAG", "QUILL"
+    PX, PY = 0.55, 0.60; ZONE, SUBZONE = "Teldrassil", "Dolanaar"; NOW = NOW + 400
+    f:SetSize(320, 420)
+    T.notes = { tasks = {}, journal = {}, forMeFolded = false, writeMode = "task" }
+    T.LinkSavedNotes()
+    P.ApplyStyle(); P.SelectArea(P.CURRENT_KEY, false); P.OnTallyChoiceChanged()
+    local function redraw() P.OnTallyChoiceChanged() end
+    local function click(b, button) b:GetScript("OnClick")(b, button or "LeftButton") end
+    local function ContentH() local _, t, _, b = P.GetPads(f); return math.max(55, f:GetHeight() - 45 - t - b) end
+
+    -- the pile: Near me first, the Journal always last; the two tabs on the right edge
+    check(P.areas[1].isCurrent and P.areas[#P.areas].isJournal and P.areas[#P.areas].key == P.JOURNAL_KEY,
+        "Journal: the last page of the pile while For me is on")
+    check(f.tabs and f.tabs.near.__shown and f.tabs.journal.__shown and f.tabs.near.open and not f.tabs.journal.open,
+        "tabs: Near me and Journal on the right edge, Near me open")
+    check(f.tabs.near.__level == f.baseLevel + 11 and f.tabs.near.tex.__tex == P.GetStyle().image
+        and f.tabs.near.y < f.tabs.journal.y, "tabs: a strip of the sheet's own image, tucked under the top sheet, Near me above")
+
+    -- "For me": heading, two writing choices, a task written, stamped and drawn
+    check(f.forMeHead and f.forMeHead.__shown and f.forMeHead.fs.__text == "For me", "For me: its own heading")
+    check(f.forMeWrite.__shown and f.forMeNote.__shown and f.forMeWrite.fs.__text:find("task") and f.forMeNote.fs.__text:find("note"),
+        "For me: two choices at the bottom, a task and a note")
+    local writeH = math.max(14, P.LineHeight(f)) + 7
+    check(math.abs(f.forMeWrite.__py - -(ContentH() - writeH)) < 0.5, "For me: the writing line sits on the bottom of the page")
+    click(f.forMeWrite)
+    check(P.forMeEditing and f.forMeEdit.__shown and f.forMeEdit.__font, "For me: clicking the line opens a writing box (font set first)")
+    f.forMeEdit:SetText("  Buy bigger |cffff0000bags|r  ")
+    f.forMeEdit:GetScript("OnEnterPressed")(f.forMeEdit)
+    local t1 = T.notes.tasks[1]
+    check(#T.notes.tasks == 1 and t1.text == "Buy bigger cffff0000bagsr" and not P.forMeEditing,
+        "For me: Enter keeps the task, trimmed, no '|' escapes (" .. tostring(t1 and t1.text) .. ")")
+    check(t1.when == "10 Nov 21:40" and t1.t == SERVER_T and t1.place.subzone == "Dolanaar" and t1.place.zone == "Teldrassil"
+        and t1.place.mapID == 57 and t1.owner == "Tester-Realm", "For me: stamped with the realm time, the place and who wrote it")
+    check(f.forMeRows[1].__shown and f.forMeRows[1].itemText.__text == t1.text and f.forMeRows[1].box.__shown,
+        "For me: the task is drawn like a tally line, with its box")
+    t1.text = "Buy bigger bags"; redraw()
+    -- Escape writes nothing; a focus loss right as the box opens is the opening click
+    click(f.forMeWrite); f.forMeEdit:SetText("never mind"); f.forMeEdit:GetScript("OnEscapePressed")(f.forMeEdit)
+    check(#T.notes.tasks == 1 and not P.forMeEditing, "For me: Escape writes nothing")
+    click(f.forMeWrite); f.forMeEdit:SetText("Mine the copper")
+    f.forMeEdit:GetScript("OnEditFocusLost")(f.forMeEdit)
+    check(P.forMeEditing and #T.notes.tasks == 1, "For me: losing focus as the box opens keeps it open")
+    NOW = NOW + 1
+    f.forMeEdit:GetScript("OnEditFocusLost")(f.forMeEdit); RunTimers()
+    check(not P.forMeEditing and #T.notes.tasks == 2 and T.notes.tasks[2].text == "Mine the copper", "For me: clicking away keeps it")
+    -- right-click = re-write; re-written to nothing = rubbed out
+    click(f.forMeRows[2], "RightButton")
+    check(P.forMeEditing and P.forMeEditing.index == 2 and f.forMeEdit:GetText() == "Mine the copper", "For me: right-click re-writes")
+    f.forMeEdit:SetText(""); f.forMeEdit:GetScript("OnEnterPressed")(f.forMeEdit)
+    check(#T.notes.tasks == 1, "For me: re-written to nothing, it's rubbed out")
+
+    -- tick it off: into the Journal as "Done: ...", flying to the Journal tab; right-click there = back
+    local row1 = f.forMeRows[1]
+    click(row1)
+    local done = T.notes.journal[#T.notes.journal]
+    check(#T.notes.tasks == 0 and done and done.text == "Done: Buy bigger bags" and done.doneTask and done.doneTask.when == t1.when,
+        "For me: a task ticked off goes to the Journal as \"Done: ...\", keeping when it was written")
+    check(f.fly and f.flyFS.__text == "Done: Buy bigger bags", "For me: ...its words fly off to the Journal tab")
+    frames(60)
+    check(not f.fly and not f.flyFS.__shown, "the flying words land and are gone")
+    P.TaskBackFromJournal(done)
+    check(#T.notes.tasks == 1 and T.notes.tasks[1].text == "Buy bigger bags" and #T.notes.journal == 0,
+        "right-click a Done note: back to For me as it was written")
+    -- write a note from For me: stamped, into the Journal
+    click(f.forMeNote)
+    check(T.notes.writeMode == "entry" and P.forMeEditing, "For me: \"write a note\" opens the box for a note")
+    f.forMeEdit:SetText("Met a friendly owl"); f.forMeEdit:GetScript("OnEnterPressed")(f.forMeEdit)
+    check(#T.notes.journal == 1 and T.notes.journal[1].text == "Met a friendly owl" and #T.notes.tasks == 1 and f.fly,
+        "For me: a note goes to the Journal (and flies there), the tasks stay")
+    frames(60)
+    -- fold
+    click(f.forMeHead)
+    check(T.notes.forMeFolded and P.PlainText(f.forMeHead.fs.__text) == "For me  · 1" and not f.forMeRows[1].__shown
+        and not f.forMeWrite.__shown, "For me: the heading folds it away, counting the tasks")
+    click(f.forMeHead)
+    check(not T.notes.forMeFolded and f.forMeRows[1].__shown, "For me: ...and opens again")
+    -- quest lines keep room; never put away while For me is on
+    check(P.ForMeReserve(f, 200, 120, true) <= 120 * P.FORME_SHARE + 0.01, "For me: quest lines keep at least half the page")
+    T.db.opts.hideWhenNothingNearby = true; PX, PY = 0.02, 0.02; NOW = NOW + 400; Refresh("ZONE_CHANGED")
+    check(f:IsShown() and #P.areas[1].items == 0 and f.forMeWrite.__shown, "For me on: the tally stays up with nothing nearby")
+    T.db.opts.hideWhenNothingNearby = false; PX, PY = 0.55, 0.60; Refresh("ZONE_CHANGED")
+
+    -- the Journal page: its tab turns to it; newest first; writing, re-writing, rubbing out
+    T.AddEntry("Second note: wolves near the |cffff0000lake|r")
+    P.TabClick("journal"); frames(60)
+    check(P.selectedKey == P.JOURNAL_KEY and f.tabs.journal.open and P.tabBack == P.CURRENT_KEY, "tabs: the quill tab turns to the Journal")
+    check(P.PlainText(f.titleFS.__text) == "Ledger" and f.journalWrite.__shown and f.journalWrite.fs.__text == "write a note...",
+        "Ledger (the Journal page): headed \"Ledger\", a writing line on top")
+    local jr1, jr2 = f.journalRows[1], f.journalRows[2]
+    check(jr1.__shown and jr1.text.__text == "Second note: wolves near the cffff0000laker" and jr2.text.__text == "Met a friendly owl",
+        "Journal: newest first")
+    check(jr1.stamp.__text == "10 Nov 21:40  ·  Dolanaar" and f.footerFS.__text:find("^2 notes"), "Journal: stamp line and the count")
+    check(not f.forMeWrite.__shown and not f.forMeHead.__shown and not f.forMeRows[1].__shown, "Journal: no For me on its page")
+    click(f.journalWrite)
+    check(P.journalEditing and f.journalEdit.__shown and f.journalEdit.__font, "Journal: the writing line opens a multi-line box")
+    f.journalEdit:SetText("Line one\n\n\n\nLine two")
+    local realShift = IsShiftKeyDown
+    IsShiftKeyDown = function() return true end
+    f.journalEdit:GetScript("OnEnterPressed")(f.journalEdit)
+    IsShiftKeyDown = realShift
+    check(P.journalEditing, "Journal: Shift-Enter is a new line, not the end")
+    f.journalEdit:GetScript("OnEnterPressed")(f.journalEdit)
+    local last = T.notes.journal[#T.notes.journal]
+    check(not P.journalEditing and last.text == "Line one\n\nLine two", "Journal: Enter keeps it, at most one blank line in a row")
+    click(f.journalRows[1])
+    check(P.journalEditing and P.journalEditing.entry == last and f.journalEdit:GetText() == last.text, "Journal: click a note to write more")
+    f.journalEdit:SetText("Line one, longer"); f.journalEdit:GetScript("OnEnterPressed")(f.journalEdit)
+    check(last.text == "Line one, longer", "Journal: ...kept in its place")
+    IsShiftKeyDown = function() return true end
+    click(f.journalRows[1])
+    IsShiftKeyDown = realShift
+    check(#T.notes.journal == 2 and T.notes.journal[#T.notes.journal] ~= last, "Journal: shift-click rubs a note out")
+
+    -- the place in a stamp filters to that place
+    SUBZONE = "Starbreeze Village"; T.AddEntry("A note somewhere else"); SUBZONE = "Dolanaar"; redraw()
+    click(f.journalRows[1].stampBtn)
+    check(P.journalFilter == "Starbreeze Village" and #P.JournalList() == 1 and P.PlainText(f.titleFS.__text):find("Starbreeze Village", 1, true),
+        "Journal: clicking the place in a stamp shows only what was written there")
+    click(f.journalRows[1].stampBtn)
+    check(P.journalFilter == nil and #P.JournalList() == 3, "Journal: ...click again for every note")
+
+    -- search: filters as you type, every word, marked in red
+    click(f.journalTools.search)
+    check(P.journalSearching and f.journalSearchBox.__shown and not f.journalWrite.__shown, "search: the box takes the writing line's place")
+    f.journalSearchBox:SetText("OWL friendly")
+    f.journalSearchBox:GetScript("OnTextChanged")(f.journalSearchBox)
+    check(#P.JournalList() == 1 and f.journalRows[1].text.__text:find("|c%x+friendly|r") and f.journalRows[1].text.__text:find("|c%x+owl|r"),
+        "search: only notes with every word, the words marked in red")
+    f.journalSearchBox:GetScript("OnEnterPressed")(f.journalSearchBox)
+    check(not P.journalSearching and P.journalSearch == "OWL friendly" and f.journalTools.search.on, "search: Enter closes the box, the search stays")
+    click(f.journalTools.search, "RightButton")
+    check(P.journalSearch == nil and #P.JournalList() == 3, "search: right-click the magnifier for every note again")
+
+    -- calendar: the month on the page, days written on circled; a day picked = only its notes
+    T.notes.journal[1].t, T.notes.journal[1].when = SERVER_T - 5 * 86400, "5 Nov 10:00"
+    click(f.journalTools.calendar)
+    local cal = f.journalCal
+    check(P.journalCalendar and P.journalCalendar.y == 2026 and P.journalCalendar.m == 11 and cal.__shown
+        and (cal.title.__text == "November 2026" or cal.title.__text == "Nov 2026"), "calendar: this month on the page (" .. tostring(cal.title.__text) .. ")")
+    check(cal.cells[10].notes and #cal.cells[10].notes == 2 and cal.cells[5].notes and #cal.cells[5].notes == 1 and not cal.cells[6].notes,
+        "calendar: the days you wrote on carry their notes")
+    check(cal.cells[10].ring[1] and cal.cells[10].ring[1].main.__shown, "calendar: ...circled by hand")
+    click(cal.cells[5])
+    check(P.journalDay and P.journalDay.d == 5 and not P.journalCalendar and #P.JournalList() == 1
+        and f.footerFS.__text:find("on 5 Nov", 1, true), "calendar: a day picked shows only its notes")
+    click(f.journalTools.calendar, "RightButton")
+    check(P.journalDay == nil and #P.JournalList() == 3, "calendar: right-click the glyph for every day again")
+    click(f.journalTools.calendar)
+    f:GetScript("OnMouseWheel")(f, -1)
+    check(P.journalCalendar.m == 12 and P.journalCalendar.y == 2026, "calendar: the mouse wheel turns the month")
+    click(cal.todayBtn)
+    check(P.journalCalendar.m == 11, "calendar: \"today\" comes back to this month")
+    click(cal.todayBtn)
+    check(not P.journalCalendar and P.journalDay and P.journalDay.d == 10, "calendar: \"today\" on this month = today's notes")
+    P.journalDay = nil; P.JournalRefresh()
+    -- the tab again: back where you were
+    P.TabClick("journal"); frames(60)
+    check(P.selectedKey == P.CURRENT_KEY and P.tabBack == nil, "tabs: the open tab clicked again goes back")
+    -- walking into a new area never turns the page under a writing box
+    P.TabClick("journal"); frames(60)
+    click(f.journalWrite)
+    T.db.opts.autoFrontOnAreaChange = true
+    SUBZONE = "Shadowglen"; Refresh("ZONE_CHANGED"); frames(60)
+    check(P.selectedKey == P.JOURNAL_KEY and P.journalEditing, "Journal: a new area never turns the page while you write")
+    P.CancelJournalEdit(); SUBZONE = "Dolanaar"; Refresh("ZONE_CHANGED"); frames(60)
+    P.SelectArea(P.CURRENT_KEY, false)
+
+    -- auto notes: achievements (off by default, only if the client has them)
+    check(T.achievementEvent and T.questTurnInEvent and T.journalEvents.__events.ACHIEVEMENT_EARNED
+        and T.journalEvents.__events.PLAYER_LEVEL_UP and T.journalEvents.__events.QUEST_COMPLETE, "auto notes: the events this client has")
+    local n0 = #T.notes.journal
+    Fire("ACHIEVEMENT_EARNED", 6)
+    check(#T.notes.journal == n0, "achievements: nothing written while switched off")
+    T.db.opts.autoAchievements = true
+    Fire("ACHIEVEMENT_EARNED", 6)
+    local a = T.notes.journal[#T.notes.journal]
+    check(a.auto == "achievement" and a.text == "Earned the achievement \"Level 10\" (10 points)." and a.achievements[1].id == 6,
+        "achievements: \"Earned the achievement ...\" with its points")
+    Fire("ACHIEVEMENT_EARNED", 7); Fire("ACHIEVEMENT_EARNED", 7); Fire("ACHIEVEMENT_EARNED", 4)
+    check(#T.notes.journal == n0 + 1 and a.text == "Earned 2 achievements: \"Level 10\" and \"Explore Teldrassil\" (20 points).",
+        "achievements: merged within a few minutes, colour codes off, the same one once, guild ones left out (" .. a.text .. ")")
+    SERVER_T = SERVER_T + 400
+    Fire("ACHIEVEMENT_EARNED", 6)
+    check(#T.notes.journal == n0 + 2, "achievements: later on, a note of its own")
+    -- level ups: on by default, glowing gold
+    Fire("PLAYER_LEVEL_UP", 8); Fire("PLAYER_LEVEL_UP", 9)
+    local lv = T.notes.journal[#T.notes.journal]
+    check(lv.auto == "level" and lv.text == "Reached levels 8 and 9." and #lv.levels == 2, "level-ups: \"Reached levels 8 and 9.\"")
+    P.TabClick("journal"); frames(60)
+    check(f.journalRows[1].text.glow and f.journalRows[1].text.glow[1].__shown and P.glowing[f.journalRows[1].text]
+        and f.journalRows[1].mark.__shown and f.journalRows[1].mark.glyphKind == "auto", "level-ups: glowing gold, with the star of an auto note")
+    check(not P.glowing[f.journalRows[2].text], "achievements: no glow (faded ink)")
+    local tt = {}
+    local realAdd = GameTooltip.AddLine
+    GameTooltip.AddLine = function(_, s) tt[#tt + 1] = s end
+    f.journalRows[2]:GetScript("OnEnter")(f.journalRows[2])
+    GameTooltip.AddLine = realAdd
+    check(table.concat(tt, "\n"):find("Reach level 10.", 1, true), "achievements: the tooltip gives its description")
+    -- quests turned in, with what they gave
+    T.db.opts.autoQuests = true
+    PANEL = { questID = 101, title = "Recipe of the Kaldorei", rewards = { { "Linen Cloth", 2, 1, 2589 } },
+        choices = { { "Hunting Bow", 1, 2, 2504 }, { "Walking Stick", 1, 2, 2505 } } }
+    Fire("QUEST_COMPLETE")
+    GetQuestReward(1)
+    Fire("QUEST_TURNED_IN", 101, 450, 12345)
+    local qn = T.notes.journal[#T.notes.journal]
+    check(qn.auto == "quest" and qn.text == "Turned in \"Recipe of the Kaldorei\" and received 2 Linen Cloth, Hunting Bow, 450 xp and 1g 23s 45c.",
+        "quests: \"Turned in ... and received ...\" (" .. qn.text .. ")")
+    check(qn.quests[1].items[2].link and qn.quests[1].items[2].quality == 2, "quests: the items keep their link and quality")
+    PANEL = nil
+    local n1 = #T.notes.journal
+    Fire("QUEST_TURNED_IN", 99999, 100, 0)
+    check(#T.notes.journal == n1, "quests: a hidden tracking quest (no panel, never in the log) isn't written down")
+    Fire("QUEST_TURNED_IN", 104, 300, 0)
+    check(#T.notes.journal == n1 and qn.text:find("^Turned in 2 quests:") and qn.text:find("\"Bashal'Aran\": 300 xp.", 1, true),
+        "quests: a quest from the log without a panel joins with its xp")
+    T.db.opts.autoAchievements, T.db.opts.autoQuests = false, false
+
+    -- slash commands
+    SlashCmdList["CACHEREQUEST"]("note Saw a |cff00ff00Green|r Dragon")
+    check(T.notes.journal[#T.notes.journal].text == "Saw a cff00ff00Greenr Dragon", "/crq note <text> writes a note, as typed")
+    SlashCmdList["CACHEREQUEST"]("task Fish in the Lake")
+    check(T.notes.tasks[#T.notes.tasks].text == "Fish in the Lake", "/crq task <text> adds a task, as typed")
+    P.SelectArea(P.CURRENT_KEY, false)
+    SlashCmdList["CACHEREQUEST"]("ledger")
+    check(P.selectedKey == P.JOURNAL_KEY, "/crq ledger opens the Ledger")
+    P.SelectArea(P.CURRENT_KEY, false)
+    SlashCmdList["CACHEREQUEST"]("journal")
+    check(P.selectedKey == P.JOURNAL_KEY, "/crq journal still opens it")
+    check(f.tabs.journal and P.areas[#P.areas].title == "Ledger", "the last page is called the Ledger")
+    SlashCmdList["CACHEREQUEST"]("look rag")
+    check(T.db.look == "RAG", "other /crq commands still work")
+    -- beta feedback: a link for this download, in the options panel and /crq feedback
+    local toc = io.open(root .. "/CacheReQuest.toc", "rb"):read("*a")
+    local tocVersion = toc:match("## Version:%s*([^\r\n]+)")
+    -- a beta (a version with "beta" in it) links a new issue titled with it; a release links the issues page
+    if tocVersion:find("beta", 1, true) then
+        check(T.BETA_VERSION == tocVersion and T.FeedbackURL() == "https://github.com/Dantigravity/CacheReQuest/issues/new?title="
+            .. tocVersion .. "%20feedback%3A%20", "feedback: a new-issue link titled with this beta's version (" .. tostring(tocVersion) .. ")")
+    else
+        check(T.BETA_VERSION == nil and T.FeedbackURL() == "https://github.com/Dantigravity/CacheReQuest/issues",
+            "feedback: a release (" .. tostring(tocVersion) .. ") links the issues page, no beta title")
+    end
+    check(T.feedbackBox and T.feedbackBox:GetText() == T.FeedbackURL(), "feedback: the link sits in a box in the options panel")
+    T.feedbackBox:SetText("typed over"); T.feedbackBox:GetScript("OnTextChanged")(T.feedbackBox, true)
+    check(T.feedbackBox:GetText() == T.FeedbackURL(), "feedback: typing can't change the link")
+    local said, realPrint = {}, print
+    print = function(s) said[#said + 1] = tostring(s) end
+    SlashCmdList["CACHEREQUEST"]("feedback")
+    print = realPrint
+    check(said[1] and said[1]:find(T.FeedbackURL(), 1, true), "/crq feedback prints the link")
+
+    -- saved per character; shared = the account file
+    local nJ, nT = #T.notes.journal, #T.notes.tasks
+    Fire("PLAYER_LOGOUT")
+    check(#QRF_SavedState.tallyNotes.journal == nJ and #QRF_SavedState.tallyNotes.tasks == nT and #CRQ_Notes.journal == 0
+        and #CRQ_Notes.tasks == 0, "saved: private notes in the character's file, none in the account's")
+    T.LoadNotes(CRQ_Notes, QRF_SavedState.tallyNotes)
+    check(#T.notes.journal == nJ and #T.notes.tasks == nT and T.notes.journal[nJ].auto == nil and CRQ_Notes == T.notes,
+        "loaded back as they were (and linked live)")
+    T.SetNotesShared("journal", true)
+    Fire("PLAYER_LOGOUT")
+    check(#CRQ_Notes.journal == nJ and #QRF_SavedState.tallyNotes.journal == 0 and #QRF_SavedState.tallyNotes.tasks == nT,
+        "shared Journal: in the account file; tasks stay the character's")
+    -- another character on the account: sees the shared Journal, with whose notes they are
+    local mine = QRF_SavedState
+    QRF_SavedState = { fieldTally = T.db }
+    local realName = UnitName
+    UnitName = function(u) if u == "player" then return "Bob" end return realName(u) end
+    T.LoadNotes(CRQ_Notes, nil)
+    check(#T.notes.journal == nJ and #T.notes.tasks == 0, "shared Journal: another character sees every note, not the tasks")
+    check(P.EntryStamp(T.notes.journal[1]):find("Tester", 1, true), "shared Journal: a note from another character says who")
+    T.AddEntry("Bob's own note")
+    T.SetNotesShared("journal", false)
+    check(#T.notes.journal == 1 and T.notes.journal[1].text == "Bob's own note" and #T.notesWaiting.journal == nJ,
+        "sharing off: each character takes back its own, the rest wait")
+    Fire("PLAYER_LOGOUT")
+    check(#CRQ_Notes.journal == nJ and #QRF_SavedState.tallyNotes.journal == 1, "...and the waiting notes stay in the account file")
+    UnitName = realName
+    QRF_SavedState = mine
+    T.LoadNotes(CRQ_Notes, QRF_SavedState.tallyNotes)
+    check(#T.notes.journal == nJ and #T.notesWaiting.journal == 0, "back on the first character: its notes are its own again")
+    -- a broken save never stops it loading
+    local okB = pcall(T.LoadNotes, { journal = { "x", { text = 5 }, { text = "ok", place = "bad", auto = "evil", levels = 3 } }, tasks = 7 }, { tasks = "no" })
+    check(okB and #T.notes.journal >= 1 and T.notes.journal[#T.notes.journal].auto == nil, "broken saved notes load safely")
+    T.LoadNotes(CRQ_Notes, mine.tallyNotes)
+
+    -- options: the For Me & Journal switches, greyed while For me is off
+    check(T.levelCheck and T.achievementCheck and T.questCheck and T.shareTasksCheck and T.shareJournalCheck,
+        "options: level-ups, achievements, quests and the two sharing switches")
+    check(T.levelCheck.__py == T.achievementCheck.__py and T.questCheck.__py == T.levelCheck.__py - 26
+        and T.shareTasksCheck.__py == T.shareJournalCheck.__py, "options: two to a row")
+    local forMeCb
+    for _, w in ipairs(T.optionWidgets) do if w.label and w.label.__text:find("For me", 1, true) then forMeCb = w end end
+    forMeCb:SetChecked(false); forMeCb:GetScript("OnClick")(forMeCb)
+    check(not T.db.opts.forMe and T.levelCheck.__alpha < 1 and not P.areas[#P.areas].isJournal
+        and not f.tabs.near.__shown and P.ForMeReserve(f, 200, 120, true) == 0, "For me off: no Journal page, no tabs, no room kept, its switches greyed")
+    forMeCb:SetChecked(true); forMeCb:GetScript("OnClick")(forMeCb)
+    check(T.db.opts.forMe and T.levelCheck.__alpha == 1 and P.areas[#P.areas].isJournal, "For me on again")
+
+    -- every look draws the Journal and its tabs
+    local okLooks = true
+    for _, look in ipairs(P.STYLES) do
+        T.db.look = look.key; P.ApplyStyle(); P.SelectArea(P.JOURNAL_KEY, false); redraw()
+        if not (f.tabs.journal.__shown and f.journalWrite.__shown) then okLooks = false end
+    end
+    check(okLooks and #ERRORS == 0, "every look draws the Journal and its tabs")
+    T.db.look = "RAG"; P.ApplyStyle(); P.SelectArea(P.CURRENT_KEY, false)
+    f:SetSize(fw0, fh0); redraw()
+end)()
+
+-- ---------------------------------------------------------------------------
+-- 31) From HandkerSheaf 2.9.0: the courier dispatch's guild stamp, and the facing arrow on the hover map
+-- ---------------------------------------------------------------------------
+;(function()
+    T.db.show, T.db.opts.mapPreview = true, true
+    SlashCmdList["CACHEREQUEST"]("look courier")
+    check(T.db.look == "DISPATCH" and f.styleKey == "DISPATCH" and f.topSheet.body.__tex == P.TEXTURE_DIR .. "courier_dispatch",
+        "/crq look courier: the courier dispatch")
+    check(not (f.stamp and f.stamp.ring.__shown) and not f.stampOn, "dispatch: no guild, no stamp")
+    GUILD = "Knights of Ash"
+    GetGuildInfo = function(u) if u == "player" then return GUILD end end
+    Fire("PLAYER_GUILD_UPDATE")
+    local S = f.stamp
+    local shown = 0
+    for _, l in ipairs(S and S.letters or {}) do if l.__shown then shown = shown + 1 end end
+    check(S and S.ring.__shown and S.ring.__tex == P.TEXTURE_DIR .. "dispatch_stamp" and shown == 12,
+        "dispatch: in a guild, the PASSED stamp with its name round the ring (" .. shown .. " letters)")
+    SlashCmdList["CACHEREQUEST"]("look rag")
+    check(not S.ring.__shown, "dispatch: other looks have no stamp")
+    GUILD = nil; Fire("PLAYER_GUILD_UPDATE")
+
+    -- the hover map: a gold arrow beside your dot, the way you face
+    local entry
+    for _, a in ipairs(P.areas) do if a.items and a.items[1] then entry = a.items[1] break end end
+    GetPlayerFacing = function() return math.pi / 2 end            -- facing west
+    local okPv = entry and pcall(T.ShowMapPreview, entry, GameTooltip)
+    local pv = T.mapPreview
+    local ar = pv and pv.you and pv.you.arrow
+    check(okPv and ar and ar.__shown and ar.__tex == P.TEXTURE_DIR .. "facing_arrow"
+        and math.abs(ar.__px - -P.FACING_ARROW_OFF) < 0.01 and math.abs(ar.__py) < 0.01,
+        "hover map: a facing arrow beside your dot, pointing the way you face")
+    GetPlayerFacing = function() return nil end                     -- some instances won't say
+    P.UpdatePreviewYou(pv)
+    check(not ar.__shown and pv.you.__shown, "hover map: no facing, just the dot")
+    GetPlayerFacing = nil
+    T.HideMapPreview()
+end)()
+
 check(#ERRORS == 0, "no Lua errors reported (" .. #ERRORS .. ")")
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

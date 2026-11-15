@@ -52,7 +52,11 @@ function methods:SetFrameLevel(l) self.__level = l end
 function methods:GetFrameLevel() return self.__level end
 function methods:SetParent(p) self.__parent = p end
 function methods:GetParent() return self.__parent end
-function methods:SetText(t) self.__text = t or "" end
+-- like WoW: an EditBox takes no text before it has a font (the Journal's writing boxes rely on this)
+function methods:SetText(t)
+    if self.__kind == "EditBox" and not self.__template and not self.__font then error("EditBox:SetText(): Font not set", 2) end
+    self.__text = t or ""
+end
 function methods:GetText() return self.__text end
 function methods:GetStringWidth() return 6 * #tostring(self.__text or "") end
 function methods:GetUnboundedStringWidth() return 6 * #tostring(self.__text or "") end
@@ -95,7 +99,11 @@ frameMT = { __index = function(t, k)
     return nil
 end }
 
-function CreateFrame(kind, name, parent) return NewRegion(kind or "Frame", parent, name) end
+function CreateFrame(kind, name, parent, template)
+    local o = NewRegion(kind or "Frame", parent, name)
+    o.__template = template          -- a templated EditBox brings its own font
+    return o
+end
 UIParent = CreateFrame("Frame", "UIParent"); UIParent.__w, UIParent.__h = 1920, 1080
 UIParent.GetCenter = function() return 960, 540 end
 ChatFrame1 = CreateFrame("Frame", "ChatFrame1"); ChatFrame1.__w, ChatFrame1.__h = 430, 120
@@ -121,7 +129,10 @@ function UnitLevel() return 7 end
 function UnitName() return "Gnarlpine Ambusher" end
 function strtrim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
 function wipe(t) for k in pairs(t) do t[k] = nil end return t end
-function hooksecurefunc(a, b, c) if type(a) == "table" then local old = a[b]; a[b] = function(...) local r = old and old(...); c(...); return r end end end
+function hooksecurefunc(a, b, c)
+    if type(a) == "table" then local old = a[b]; a[b] = function(...) local r = old and old(...); c(...); return r end
+    elseif type(a) == "string" then local old = _G[a]; _G[a] = function(...) local r = old and old(...); b(...); return r end end
+end
 function geterrorhandler() return function(msg) table.insert(ERRORS, msg); print("ERRORHANDLER: " .. tostring(msg)) end end
 function debugstack() return "(stack)" end
 SlashCmdList = {}
@@ -195,6 +206,44 @@ C_QuestLog = {
 }
 function GetNumQuestLogRewards() return 0 end
 function GetNumQuestLogChoices() return 0 end
+
+-- Realm clock (the in-game calendar) and server time, for the Journal's stamps
+SERVER_T = 1794000000
+function GetServerTime() return SERVER_T end
+CAL = { year = 2026, month = 11, monthDay = 10, weekday = 3, hour = 21, minute = 40 }
+C_DateAndTime = { GetCurrentCalendarTime = function() return CAL end }
+C_EventUtils = { IsEventValid = function() return true end }
+
+-- Achievements: [id] = { name, points, description, isGuild }
+ACHIEVEMENTS = {
+    [6] = { "Level 10", 10, "Reach level 10." },
+    [7] = { "|cffffd200Explore Teldrassil|r", 10, "Explore Teldrassil." },
+    [4] = { "Guild Level 5", 10, "Reach guild level 5.", true },
+}
+function GetAchievementInfo(id)
+    local a = ACHIEVEMENTS[id]
+    if not a then return nil end
+    return id, a[1], a[2], true, 11, 10, 26, a[3], 0, 0, "", a[4] or false
+end
+
+-- The quest reward panel (QUEST_COMPLETE): PANEL = { questID, title, rewards = { {name, count, quality, itemID} }, choices = {...} }
+PANEL = nil
+function GetQuestID() return PANEL and PANEL.questID or 0 end
+function GetTitleText() return PANEL and PANEL.title or "" end
+function GetNumQuestRewards() return PANEL and #PANEL.rewards or 0 end
+function GetNumQuestChoices() return PANEL and #PANEL.choices or 0 end
+function GetQuestItemInfo(kind, i)
+    local list = PANEL and ((kind == "choice") and PANEL.choices or PANEL.rewards) or {}
+    local it = list[i]
+    if not it then return nil end
+    return it[1], "icon", it[2], it[3], true, it[4]
+end
+function GetQuestItemLink(kind, i)
+    local list = PANEL and ((kind == "choice") and PANEL.choices or PANEL.rewards) or {}
+    local it = list[i]
+    return it and ("|cffffffff|Hitem:" .. it[4] .. "|h[" .. it[1] .. "]|h|r") or nil
+end
+function GetQuestReward(choice) REWARD_TAKEN = choice end
 
 Settings = {
     RegisterCanvasLayoutCategory = function(panel, name) return { GetID = function() return 99 end, panel = panel } end,

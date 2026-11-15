@@ -2443,6 +2443,7 @@ function P.OnUpdate(f, elapsed)
         P.PulseHalo(f, GetTime())
     end
     if f.sheenOn then P.AnimateSheen(f, GetTime()) end
+    if P.AnimateJournal then P.AnimateJournal(f, dt) end     -- Journal.lua: gold glow, a note flying in, the tabs
 
     local c = f.corner
     if c and c:IsShown() then
@@ -2472,7 +2473,8 @@ function P.CheckAreaChange(f)
     P.lastAreaSig = sig
     P.currentGlowUntil = GetTime() + 7
 
-    if T.db.opts.autoFrontOnAreaChange and P.selectedKey ~= P.CURRENT_KEY then
+    -- never while you're writing a task / note or searching the Journal (the page would turn under the box)
+    if T.db.opts.autoFrontOnAreaChange and P.selectedKey ~= P.CURRENT_KEY and not (P.IsWriting and P.IsWriting()) then
         if f:IsShown() and not f.shuffle then
             f.shuffle = { t = 0, dur = 0.55, key = P.CURRENT_KEY, swapped = false, dir = -1 }
         elseif not f.shuffle then
@@ -2485,8 +2487,9 @@ end
 -- ----------------------------------------------------------------------------
 -- CHECKLIST ROWS (hand-inked box, quill tick, per-line strike-through)
 -- ----------------------------------------------------------------------------
-local function AcquireShoppingListRow(idx, parent)
-    local row = T.rowPool[idx]
+local function AcquireShoppingListRow(idx, parent, pool)
+    pool = pool or T.rowPool                -- Journal.lua's "For me" tasks keep their own pool
+    local row = pool[idx]
     if row then return row end
 
     row = CreateFrame("Button", nil, parent)
@@ -2554,10 +2557,11 @@ local function AcquireShoppingListRow(idx, parent)
     row.divider:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -2, 0)
     row.divider:SetColorTexture(0.45, 0.32, 0.15, 0.14)
 
-    T.rowPool[idx] = row
+    pool[idx] = row
     P.StyleRow(row)
     return row
 end
+P.AcquireRow = AcquireShoppingListRow
 
 -- the box's four crooked strokes, in the current ink
 function P.DrawBoxSides(box)
@@ -2975,6 +2979,10 @@ local function EnsureShoppingListFrame()
     f.footerFS = footerFS
 
     f:SetScript("OnMouseWheel", function(_, delta)
+        if P.journalCalendar and P.selectedKey == P.JOURNAL_KEY then      -- the Journal's calendar: month by month
+            P.ShiftCalendar((delta or 0) > 0 and -1 or 1)
+            return
+        end
         local total = f.totalItems or 0
         local maxScroll = math.max(0, total - 1)
         T.scroll = math.min(maxScroll, math.max(0, T.scroll - delta))
@@ -3392,7 +3400,10 @@ function P.HideKindHeadings(f, from)
 end
 
 -- Would the tally be put away with these pages? (no lines anywhere, or "hide when nothing is nearby")
+-- While "For me" is on, never: it's simply on or off, since your tasks, the writing line and the Journal
+-- tab are on it (Journal.lua).
 function P.ShouldHideTally(areas)
+    if T.db.opts.forMe then return false end
     local current = areas[1]
     local anyItems = false
     for _, a in ipairs(areas) do
@@ -3742,6 +3753,7 @@ function P.Render(f)
     for _, row in ipairs(T.rowPool) do
         row:Hide()
     end
+    if not area.isJournal then P.HideJournal(f) end
 
     local pageIdx, pageCount = P.GetAreaIndex(area.key), #P.areas
     local pageStr = (pageCount > 1) and string.format("  ·  page %d of %d", pageIdx, pageCount) or ""
@@ -3750,6 +3762,7 @@ function P.Render(f)
     local st = P.GetStyle()
     if f.styleKey ~= st.key then P.ApplyStyle(f) end
     P.LayoutPads(f)
+    P.LayoutTabs(f)                          -- the Near me / Journal tabs on the right edge (Journal.lua)
     local padL, padT, padR, padB = P.GetPads(f)
     for _, b in pairs(f.quickBtns or {}) do P.DrawQuickButton(b) end      -- in this look's ink
 
@@ -3766,7 +3779,7 @@ function P.Render(f)
     else
         f.titleFS:SetTextColor(st.title[1], st.title[2], st.title[3], 1)
     end
-    if area.isCurrent and area.subtitle and area.subtitle ~= "" then
+    if (area.isCurrent or area.isJournal) and area.subtitle and area.subtitle ~= "" then
         f.titleFS:SetText(title .. "  |c" .. P.Hex(st.sub) .. "· " .. area.subtitle .. "|r")
     else
         f.titleFS:SetText(title)
@@ -3776,6 +3789,14 @@ function P.Render(f)
     local ruleW = math.min(w - 20 - padL - padR, math.max(60, (f.titleFS:GetStringWidth() or 80) + 22))
     P.DrawStroke(f.titleRule, f.chrome, 8 + padL, -25 - padT, 8 + padL + ruleW, -24 - padT, 1.2, 0.70)
     P.DrawStroke(f.titleRule2, f.chrome, 14 + padL, -27.5 - padT, 8 + padL + ruleW * 0.55, -27 - padT, 0.7, 0.40)
+
+    -- the Journal's page (Journal.lua) draws its own notes
+    local pageContentW = math.max(150, w - 12 - padL - padR)
+    local pageContentH = math.max(55, (f:GetHeight() or 175) - 45 - padT - padB)
+    if area.isJournal then
+        P.RenderJournal(f, area, pageContentW, pageContentH, pageStr)
+        return
+    end
 
     if #items == 0 then
         P.HideKindHeadings(f, 1)
@@ -3798,12 +3819,14 @@ function P.Render(f)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", f.content, "TOPLEFT", 0, -2)
         row:SetPoint("TOPRIGHT", f.content, "TOPRIGHT", 0, -2)
-        row:SetHeight(math.max(36, math.ceil(row.itemText:GetStringHeight() or 30) + 6))
+        local msgH = math.max(36, math.ceil(row.itemText:GetStringHeight() or 30) + 6)
+        row:SetHeight(msgH)
         row:SetScript("OnClick", nil)
         row:SetScript("OnEnter", nil)
         row:SetScript("OnLeave", nil)
         row:Show()
         f.footerFS:SetText("nothing here" .. pageStr)
+        P.RenderForMe(f, area, -2 - msgH, pageContentW, pageContentH)      -- your own tasks under it (Near me only)
         return
     end
 
@@ -3811,8 +3834,9 @@ function P.Render(f)
         T.scroll = math.max(0, #items - 1)
     end
 
-    local contentW = math.max(150, w - 12 - padL - padR)
-    local contentH = math.max(55, (f:GetHeight() or 175) - 45 - padT - padB)
+    local contentW, contentH = pageContentW, pageContentH
+    -- on Near me the quest lines leave room for "For me" at the bottom (Journal.lua)
+    local questH = area.isCurrent and (contentH - P.ForMeReserve(f, contentW, contentH, true)) or contentH
     local yCursor = 0
     local shownRows = 0
     P.SetInkFont(f.measureFS, "item")
@@ -3931,7 +3955,7 @@ function P.Render(f)
         local group = P.LineGroup(entry)
         local headH = (heads and group ~= lastGroup) and P.KIND_HEADING_H or 0
 
-        if (math.abs(yCursor) + headH + rowH) > (contentH + 4) and shownRows > 0 then
+        if (math.abs(yCursor) + headH + rowH) > (questH + 4) and shownRows > 0 then
             row:Hide()
             break
         end
@@ -3988,6 +4012,7 @@ function P.Render(f)
     end
 
     P.HideKindHeadings(f, usedHeads + 1)
+    P.RenderForMe(f, area, yCursor, contentW, contentH)       -- your own tasks at the bottom (Near me only)
     local doneCount = area.doneCount or 0
     local verb = P.TallyVerb()
     if #items > shownRows then
@@ -4006,6 +4031,7 @@ T.Update = function()
     end
 
     local areas = P.BuildAreas()
+    if T.db.opts.forMe then table.insert(areas, P.JournalArea()) end     -- the Journal: always the last page
     P.areas = areas
     local current = areas[1]
     P.CheckAreaChange(f)
@@ -5174,6 +5200,7 @@ function T.BuildOptionsPanel()
     sub:SetPoint("TOPLEFT", p, "TOPLEFT", 16, y)
     sub:SetText("The Field Tally: a handwritten note of the quest items you still have to collect and the tasks still to do.")
     y = y - 26
+    if T.BuildFeedbackRow then y = y - T.BuildFeedbackRow(p, y) end     -- a link to leave comments (Journal.lua)
 
     local function Section(text)
         local fs = p:CreateFontString(nil, "ARTWORK", "GameFontNormal")
@@ -5317,7 +5344,8 @@ function T.BuildOptionsPanel()
             if T.db.show then P.TurnTallyOn() end      -- says so in chat if this just put it away
         end, 44)
     local hideRefresh = hideCb.Refresh
-    hideCb.Refresh = function(self) hideRefresh(self); self:SetAlpha(T.db.show and 1 or 0.45) end
+    -- also greyed while "For me" is on: then the tally is never put away (P.ShouldHideTally)
+    hideCb.Refresh = function(self) hideRefresh(self); self:SetAlpha((T.db.show and not T.db.opts.forMe) and 1 or 0.45) end
 
     -- Colour swatches (+ Custom... = WoW's colour picker). which = "rune" (Arcane script's rune circle,
     -- beside the Look button, only while that look is chosen) or "ink" (the writing, every look; each
@@ -5664,6 +5692,13 @@ function T.BuildOptionsPanel()
         function() return T.db.opts.trackerGear end,
         function(v) T.db.opts.trackerGear = v; T.EnsureTrackerGear(); T.UpdateTrackerGear() end)
 
+    -- "For me" tasks, the Journal and its auto notes (Journal.lua)
+    if T.BuildJournalOptions then
+        y = y - 4
+        T.BuildJournalOptions({ Section = Section, Check = Check,
+            GetY = function() return y end, SetY = function(v) y = v end })
+    end
+
     y = y - 6
     Button("Reset Position & Size", 170, 24, function()
         T.ResetShoppingListPosition()
@@ -5675,7 +5710,7 @@ function T.BuildOptionsPanel()
     hint:SetPoint("TOPLEFT", p, "TOPLEFT", 20, y)
     hint:SetPoint("RIGHT", p, "RIGHT", -24, 0)
     hint:SetJustifyH("LEFT")
-    hint:SetText("Slash: /crq (options), /crq tally, /crq look [handkerchief|parchment|crumpled|rag|slate|bark|leaf|leather|marble|gilded|vellum|arcane|window], /crq reset, /crq debug")
+    hint:SetText("Slash: /crq (options), /crq tally, /crq look [handkerchief|parchment|crumpled|rag|slate|bark|leaf|leather|marble|gilded|vellum|arcane|window], /crq reset, /crq debug, /crq journal, /crq note <text>, /crq task <text>, /crq feedback")
     y = y - 30
 
     p:SetHeight(math.abs(y) + 20)
